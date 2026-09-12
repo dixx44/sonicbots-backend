@@ -46,6 +46,10 @@ app.use(cors({
     credentials: true
 }));
 
+// Health-check endpoint (required by Render / Railway to keep service alive)
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'AURA-OS', version: '3.0' }));
+app.get('/', (_req, res) => res.json({ status: 'ok', service: 'AURA-OS Backend' }));
+
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
