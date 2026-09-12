@@ -1972,8 +1972,8 @@ function _triggerBotTurnIfNeeded(game) {
 }
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-    console.log(`AURA-OS [v3.0] ONLINE ON PORT ${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(`AURA-OS [v3.0] ONLINE ON PORT ${PORT} (0.0.0.0)`);
 
     // Social Engine: Real-time status toggling and auto-messages
     setInterval(() => {
