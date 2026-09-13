@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, ScanFace, Terminal, ShieldAlert, ShieldCheck, Cpu, Video, Phone, Users, LayoutDashboard, Settings, MoreVertical, MessageSquare, Lock, PhoneCall, X, Image as ImageIcon, Smile, User, Gamepad2, Swords, Zap, Wallet, UserPlus, LogOut, ChevronLeft, ChevronRight, ChevronDown, Eye, EyeOff, Info, Pencil, Check, Sparkles, Archive, Trash, Trash2, Reply, ArrowLeft, Compass, HelpCircle, BookOpen, MessageCircle, CheckCircle2, Receipt, CalendarDays } from "lucide-react";
+import { Send, ScanFace, Terminal, ShieldAlert, ShieldCheck, Cpu, Video, VideoOff, Phone, PhoneOff, Mic, MicOff, Volume2, VolumeX, Users, LayoutDashboard, Settings, MoreVertical, MessageSquare, Lock, PhoneCall, X, Image as ImageIcon, Smile, User, Gamepad2, Swords, Zap, Wallet, UserPlus, LogOut, ChevronLeft, ChevronRight, ChevronDown, Eye, EyeOff, Info, Pencil, Check, Sparkles, Archive, Trash, Trash2, Reply, ArrowLeft, Compass, HelpCircle, BookOpen, MessageCircle, CheckCircle2, Receipt, CalendarDays } from "lucide-react";
 import { io, Socket } from "socket.io-client";
 import CryptoJS from 'crypto-js';
 import Peer from 'simple-peer';
@@ -1389,6 +1389,10 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       setTimeout(() => socket.emit("get_call_logs"), 800);
     });
 
+    socket.on("incoming_call_dismissed", () => {
+      setIncomingCall(null);
+    });
+
     socket.on("receive_call_logs", (logs: any[]) => {
       setCallLogs(logs);
     });
@@ -1591,13 +1595,42 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
     const currentOnlineUser = onlineUsers.find((u: any) => u.username === user.username);
     const actualTargetId = currentOnlineUser ? currentOnlineUser.id : user.id;
     const avatarSrc = getAvatarSrc(user.username, user.avatar);
+    const isAi = (actualTargetId && String(actualTargetId).startsWith("agent_")) ||
+                 (user.id && String(user.id).startsWith("agent_")) ||
+                 (user.username && (
+                   user.username === "AURA-OS" ||
+                   user.username.includes("Alpha") ||
+                   user.username.includes("Nova") ||
+                   user.username.includes("Cyber") ||
+                   user.username.includes("Vortex") ||
+                   user.username.includes("Luna") ||
+                   user.username.includes("Shadow") ||
+                   user.username.includes("Zenith") ||
+                   user.username.includes("Pulse") ||
+                   user.username.includes("Titan") ||
+                   user.username.includes("Echo") ||
+                   user.username.includes("Solar") ||
+                   user.username.includes("Matrix") ||
+                   user.username.includes("Blaze") ||
+                   user.username.includes("Prism") ||
+                   user.username.includes("Omega") ||
+                   user.username.includes("Ghost") ||
+                   user.username.includes("Rift") ||
+                   user.username.includes("Flux") ||
+                   user.username.includes("Void") ||
+                   user.username.includes("Neon") ||
+                   user.username.toLowerCase().includes("bot") ||
+                   user.username.toLowerCase().includes("agent")
+                 )) ||
+                 (user.about && user.about.toLowerCase().includes("neural"));
+
     setActiveCall({ 
-      userId: actualTargetId, 
+      userId: actualTargetId || user.id || `agent_${user.username}`, 
       username: user.username, 
       avatarSrc,
       isCaller: true, 
-      isAi: actualTargetId?.startsWith("agent_"),
-      isVideo 
+      isAi: !!isAi,
+      isVideo: isAi ? false : isVideo 
     });
   };
 
@@ -2702,33 +2735,56 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
 }
 
 function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
-  const [status, setStatus] = useState("Connecting to Neural Node...");
+  const [status, setStatus] = useState("Establishing Neural Voice Link...");
   const [transcript, setTranscript] = useState("");
-  const isSpeakingRef = useRef(false);
+  const [aiResponseText, setAiResponseText] = useState("");
   const [isSpeakingUI, setIsSpeakingUI] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [customTalkInput, setCustomTalkInput] = useState("");
+
+  const isSpeakingRef = useRef(false);
   const recognitionRef = useRef<any>(null);
   const aiMessageRef = useRef("");
   const listeningRef = useRef(false);
 
+  // Call duration counter
+  useEffect(() => {
+    const timer = setInterval(() => setCallDuration(d => d + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60).toString().padStart(2, '0');
+    const s = (secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
   // Helper: wait for voices to be available then speak
   const speakWithVoice = (text: string, onDone?: () => void) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      onDone && onDone();
+      return;
+    }
     const doSpeak = () => {
       window.speechSynthesis.cancel();
       const speech = new SpeechSynthesisUtterance(text);
       const voices = window.speechSynthesis.getVoices();
       const premiumVoice =
-        voices.find(v => v.name.includes("Google") && v.lang.startsWith("en")) ||
+        voices.find(v => (v.name.includes("Google") || v.name.includes("Natural")) && v.lang.startsWith("en")) ||
         voices.find(v => v.lang.startsWith("en-US")) ||
         voices.find(v => v.lang.startsWith("en")) ||
         voices[0];
       if (premiumVoice) speech.voice = premiumVoice;
-      speech.rate = 1.0;
-      speech.pitch = 1.1;
+      speech.rate = 1.05;
+      speech.pitch = 1.05;
       speech.volume = 1.0;
       speech.onend = () => { onDone && onDone(); };
       speech.onerror = () => { onDone && onDone(); };
       window.speechSynthesis.speak(speech);
     };
+
     const voices = window.speechSynthesis.getVoices();
     if (voices.length > 0) {
       doSpeak();
@@ -2737,19 +2793,37 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
         window.speechSynthesis.onvoiceschanged = null;
         doSpeak();
       };
-      // Fallback: if onvoiceschanged never fires (non-Chrome), try after short delay
       setTimeout(() => {
         if (!window.speechSynthesis.speaking) doSpeak();
-      }, 500);
+      }, 400);
     }
   };
 
   const startListening = () => {
-    if (isSpeakingRef.current || listeningRef.current) return;
+    if (isSpeakingRef.current || listeningRef.current || isMicMuted) return;
     try {
       recognitionRef.current?.start();
       listeningRef.current = true;
+      setIsListening(true);
     } catch (e) { }
+  };
+
+  const stopListening = () => {
+    try {
+      recognitionRef.current?.abort();
+      listeningRef.current = false;
+      setIsListening(false);
+    } catch (e) { }
+  };
+
+  const sendTalkMessage = (textToSend: string) => {
+    if (!textToSend.trim()) return;
+    setTranscript(textToSend);
+    setStatus("AI is processing neural thoughts...");
+    isSpeakingRef.current = true;
+    setIsSpeakingUI(true);
+    stopListening();
+    socket?.emit("send_message", { targetId: activeCall.userId, text: textToSend, isEncrypted: false });
   };
 
   useEffect(() => {
@@ -2760,60 +2834,64 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
       rec.interimResults = false;
       rec.lang = 'en-US';
 
-      rec.onstart = () => { listeningRef.current = true; };
+      rec.onstart = () => {
+        listeningRef.current = true;
+        setIsListening(true);
+      };
 
       rec.onresult = (event: any) => {
         listeningRef.current = false;
+        setIsListening(false);
         const text = event.results[0][0].transcript;
-        setTranscript(text);
-        setStatus("AI is processing...");
-        socket?.emit("send_message", { targetId: activeCall.userId, text, isEncrypted: false });
+        sendTalkMessage(text);
       };
 
       rec.onend = () => {
         listeningRef.current = false;
-        // Restart listening if AI is not currently speaking
-        if (!isSpeakingRef.current) {
-          setTimeout(() => startListening(), 300);
+        setIsListening(false);
+        if (!isSpeakingRef.current && !isMicMuted) {
+          setTimeout(() => startListening(), 400);
         }
       };
 
       rec.onerror = (e: any) => {
         listeningRef.current = false;
-        if (e.error !== 'no-speech' && e.error !== 'aborted') {
-          setStatus("Mic error – retrying...");
-        }
-        if (!isSpeakingRef.current) {
-          setTimeout(() => startListening(), 800);
+        setIsListening(false);
+        if (!isSpeakingRef.current && !isMicMuted) {
+          setTimeout(() => startListening(), 1000);
         }
       };
 
       recognitionRef.current = rec;
-    } else {
-      setStatus("Speech Recognition not supported in this browser.");
     }
 
-    // Initial greeting + start listening
+    // Initial greeting
+    const greetingText = `Neural connection secured with ${activeCall.username}. I am online and listening. What would you like to discuss?`;
     const t1 = setTimeout(() => {
-      setStatus("Connected. Listening...");
-      speakWithVoice(`Secure neural voice channel established with ${activeCall.username}. Speak now.`, () => {
+      setStatus("Neural Line Active · Speaking");
+      setIsSpeakingUI(true);
+      isSpeakingRef.current = true;
+      setAiResponseText(greetingText);
+      speakWithVoice(greetingText, () => {
+        isSpeakingRef.current = false;
+        setIsSpeakingUI(false);
+        setStatus("Listening to your voice...");
         startListening();
       });
-    }, 1000);
+    }, 800);
 
     const handleStreamStart = (msg: any) => {
-      if (msg.senderId === activeCall.userId) {
+      if (msg.senderId === activeCall.userId || msg.senderUsername === activeCall.userId) {
         aiMessageRef.current = "";
-        setStatus("AI is thinking...");
+        setStatus("AI is generating voice...");
         isSpeakingRef.current = true;
         setIsSpeakingUI(true);
-        listeningRef.current = false;
-        try { recognitionRef.current?.abort(); } catch (e) { }
+        stopListening();
       }
     };
 
     const handleStreamChunk = (msg: any) => {
-      if (msg.senderId === activeCall.userId) {
+      if (msg.senderId === activeCall.userId || msg.senderUsername === activeCall.userId) {
         aiMessageRef.current += msg.text;
       }
     };
@@ -2821,23 +2899,24 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
     const handleStreamEnd = (msg: any) => {
       const fullText = aiMessageRef.current || (msg && msg.text) || "";
       if (fullText) {
-        setStatus("AI is speaking...");
+        setAiResponseText(fullText);
+        setStatus(`${activeCall.username} is speaking...`);
         speakWithVoice(fullText, () => {
           isSpeakingRef.current = false;
           setIsSpeakingUI(false);
-          setStatus("Listening...");
-          setTimeout(() => startListening(), 300);
+          setStatus("Listening to your voice...");
+          setTimeout(() => startListening(), 400);
         });
       } else {
         isSpeakingRef.current = false;
         setIsSpeakingUI(false);
-        setStatus("Listening...");
-        setTimeout(() => startListening(), 300);
+        setStatus("Listening to your voice...");
+        setTimeout(() => startListening(), 400);
       }
     };
 
     const handleReceiveMsg = (msg: any) => {
-      if (msg.senderId === activeCall.userId && !msg.isStreaming) {
+      if ((msg.senderId === activeCall.userId || msg.senderUsername === activeCall.userId) && !msg.isStreaming) {
         aiMessageRef.current = msg.text || "";
         handleStreamEnd(msg);
       }
@@ -2850,7 +2929,9 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
 
     return () => {
       clearTimeout(t1);
-      window.speechSynthesis.cancel();
+      if (typeof window !== 'undefined' && ('speechSynthesis' in window)) {
+        window.speechSynthesis.cancel();
+      }
       isSpeakingRef.current = false;
       listeningRef.current = false;
       if (recognitionRef.current) {
@@ -2864,22 +2945,139 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
       socket?.off("receive_message", handleReceiveMsg);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isMicMuted]);
 
   return (
-    <div className="absolute inset-0 bg-[#050810] z-50 flex flex-col items-center justify-center">
-      <div className={`text-emerald-500 transition-all ${isSpeakingUI ? 'scale-125 animate-pulse' : 'scale-100'} mb-8`}>
-        <svg width="200" height="100" viewBox="0 0 200 100">
-          <path d="M10,50 Q40,10 70,50 T130,50 T190,50" fill="none" stroke="currentColor" strokeWidth="4" />
-          <path d="M10,50 Q40,90 70,50 T130,50 T190,50" fill="none" stroke="currentColor" strokeWidth="4" opacity="0.5" />
-        </svg>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-[#060a14]/98 backdrop-blur-2xl z-50 flex flex-col items-center justify-between p-6 sm:p-10 select-none">
+      {/* Top Header */}
+      <div className="w-full max-w-lg flex flex-col items-center gap-2 pt-2">
+        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[11px] uppercase tracking-wider">
+          <Cpu className="w-3.5 h-3.5 animate-pulse" />
+          <span>NEURAL AI VOICE CHANNEL · {formatTime(callDuration)}</span>
+        </div>
+        <p className="text-gray-400 font-mono text-xs">{status}</p>
       </div>
-      <h2 className="text-3xl font-bold text-white mb-2">{activeCall.username}</h2>
-      <p className="text-emerald-500 font-mono tracking-widest">{status}</p>
-      {transcript && <p className="text-gray-400 mt-4 italic text-center max-w-md">" {transcript} "</p>}
-      <button onClick={onEnd} className="mt-12 w-16 h-16 rounded-full bg-red-500 hover:bg-red-400 flex items-center justify-center transition-all shadow-[0_0_20px_rgba(239,68,68,0.5)]"><Phone className="w-8 h-8 rotate-[135deg]" /></button>
-    </div>
-  )
+
+      {/* Middle: Avatar & Neural Waveform */}
+      <div className="flex flex-col items-center justify-center my-auto w-full max-w-md text-center">
+        <div className="relative mb-6">
+          <div className={`absolute -inset-6 rounded-full bg-cyan-500/15 blur-xl transition-all duration-500 ${isSpeakingUI ? 'scale-150 opacity-100' : 'scale-100 opacity-40'}`} />
+          <div className={`w-32 h-32 sm:w-36 sm:h-36 rounded-full border-4 border-cyan-400/80 overflow-hidden bg-[#0c1424] shadow-[0_0_50px_rgba(6,182,212,0.4)] relative z-10 flex items-center justify-center transition-transform ${isSpeakingUI ? 'scale-105' : 'scale-100'}`}>
+            <img
+              src={activeCall.avatarSrc || `https://api.dicebear.com/7.x/bottts/svg?seed=${activeCall.username}`}
+              alt="AI Avatar"
+              className="w-full h-full object-cover"
+            />
+          </div>
+        </div>
+
+        <h2 className="text-2xl sm:text-3xl font-black text-white tracking-wider uppercase font-mono mb-1">{activeCall.username}</h2>
+        <span className="text-[11px] text-cyan-400 font-mono uppercase tracking-widest mb-4">Neural Agent V3.0</span>
+
+        {/* Animated Soundwave */}
+        <div className="flex items-center justify-center gap-1.5 h-12 mb-4">
+          {[40, 75, 100, 60, 90, 45, 80, 50, 95, 30].map((h, i) => (
+            <motion.div
+              key={i}
+              animate={{ height: isSpeakingUI ? [12, h, 12] : isListening ? [6, 25, 6] : 6 }}
+              transition={{ repeat: Infinity, duration: 0.8 + (i * 0.08), ease: "easeInOut" }}
+              className={`w-1.5 rounded-full ${isSpeakingUI ? 'bg-gradient-to-t from-cyan-500 to-emerald-400' : isListening ? 'bg-emerald-400' : 'bg-gray-600'}`}
+            />
+          ))}
+        </div>
+
+        {/* Speech Transcript or AI Response Box */}
+        {aiResponseText && (
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4 text-xs font-sans text-gray-200 leading-relaxed max-w-sm mb-3 shadow-inner max-h-24 overflow-y-auto">
+            "{aiResponseText}"
+          </div>
+        )}
+
+        {transcript && (
+          <p className="text-emerald-400 font-mono text-xs italic tracking-wide max-w-sm truncate">
+            You: "{transcript}"
+          </p>
+        )}
+
+        {/* Quick Voice Prompt Chips */}
+        <div className="flex flex-wrap items-center justify-center gap-2 mt-4 max-w-sm">
+          {["Hello! How are you?", "Let's play Ludo 🎲", "Who built you?", "Tell me a joke 🤖"].map((chip) => (
+            <button
+              key={chip}
+              onClick={() => sendTalkMessage(chip)}
+              className="px-3 py-1 bg-white/5 hover:bg-cyan-500/20 border border-white/10 hover:border-cyan-500/40 rounded-full text-[11px] font-mono text-gray-300 hover:text-white transition-all active:scale-95 cursor-pointer"
+            >
+              {chip}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Bottom Controls */}
+      <div className="w-full max-w-md pb-6 flex flex-col items-center gap-4">
+        {/* Quick Speech input for instant vocal reply */}
+        <div className="w-full flex items-center bg-black/40 border border-white/10 rounded-full px-3 py-1.5 focus-within:border-cyan-500/60 transition-all">
+          <input
+            type="text"
+            value={customTalkInput}
+            onChange={(e) => setCustomTalkInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && customTalkInput.trim()) {
+                sendTalkMessage(customTalkInput.trim());
+                setCustomTalkInput("");
+              }
+            }}
+            placeholder={`Say or type to ${activeCall.username}...`}
+            className="flex-1 bg-transparent border-none outline-none text-white placeholder-gray-500 font-mono text-xs px-2"
+          />
+          <button
+            onClick={() => {
+              if (customTalkInput.trim()) {
+                sendTalkMessage(customTalkInput.trim());
+                setCustomTalkInput("");
+              }
+            }}
+            disabled={!customTalkInput.trim()}
+            className="p-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 rounded-full text-black transition-all"
+            title="Send voice prompt"
+          >
+            <Send className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-6">
+          {/* Mic Toggle Button */}
+          <button
+            onClick={() => {
+              const next = !isMicMuted;
+              setIsMicMuted(next);
+              if (next) stopListening();
+              else startListening();
+            }}
+            className={`w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${
+              isMicMuted
+                ? 'bg-red-500/20 border-2 border-red-500 text-red-400'
+                : isListening
+                ? 'bg-emerald-500/30 border-2 border-emerald-400 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.4)] animate-pulse'
+                : 'bg-white/10 border border-white/15 text-white hover:bg-white/20'
+            }`}
+            title={isMicMuted ? "Unmute Mic" : "Mute Mic"}
+          >
+            {isMicMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+          </button>
+
+          {/* End Call Button */}
+          <button
+            onClick={onEnd}
+            className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 text-white flex items-center justify-center shadow-[0_0_35px_rgba(239,68,68,0.6)] hover:scale-105 active:scale-95 transition-all"
+            title="End AI Call"
+          >
+            <Phone className="w-8 h-8 rotate-[135deg]" />
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  );
 }
 
 function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, typingStatus, setUnreadMap, setLastMessageMap, selectedChatId, onlineUsers, onCall, onBack, nicknames, onNicknameChange, archivedChats, toggleArchiveChat, deleteChat, isVirtualDm, onCollectPayment, virtualDmOpening, autoStartLudoLobby, onDeployToGrid, avatarCache, onSelectReceipt }: any) {
@@ -3743,12 +3941,12 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
               filter: `brightness(${wallpaperBrightness}%) contrast(${wallpaperContrast}%)`
             }}
           />
-          {/* Chat Area Scrollable */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-4 relative z-10 scrollbar-thin scrollbar-thumb-emerald-900/50">
+          {/* Chat Area Scrollable with WhatsApp feel */}
+          <div className="flex-1 overflow-y-auto p-2.5 sm:p-4 md:p-6 space-y-2 sm:space-y-3 relative z-10 scrollbar-thin scrollbar-thumb-emerald-900/50 w-full max-w-full">
             <AnimatePresence>
               {visibleMessages.length === 0 && (
-                <div key="empty-messages" className="text-center mt-20 text-gray-600 font-mono text-[10px] uppercase tracking-widest bg-white/5 inline-block px-6 py-2 rounded-full mx-auto block w-max">
-                  <ShieldCheck className="inline-block w-4 h-4 mr-2 text-emerald-500" /> {targetId ? `Encrypted tunnel with ${currentDisplayName} established` : "End-to-End Encrypted Tunnel Active"}
+                <div key="empty-messages" className="text-center mt-16 sm:mt-20 text-gray-500 font-mono text-[10px] uppercase tracking-widest bg-white/5 inline-block px-4 sm:px-6 py-2 rounded-full mx-auto block w-max max-w-[90%] truncate">
+                  <ShieldCheck className="inline-block w-4 h-4 mr-2 text-emerald-500" /> {targetId ? `Encrypted tunnel with ${currentDisplayName}` : "End-to-End Encrypted Tunnel Active"}
                 </div>
               )}
               {visibleMessages.map((msg, idx) => {
@@ -3870,7 +4068,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                           </div>
                         </div>
                       ) : (
-                        <div className={`w-full max-w-[85%] md:max-w-[70%] flex flex-col ${msg.senderName === username ? "items-end" : "items-start"}`}>
+                        <div className={`w-full max-w-[88%] sm:max-w-[78%] md:max-w-[68%] flex flex-col ${msg.senderName === username ? "items-end" : "items-start"}`}>
                           <div
                             onTouchStart={(e) => handleTouchStart(e, msg)}
                             onTouchMove={handleTouchMove}
@@ -3880,11 +4078,11 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                                 e.preventDefault();
                               }
                             }}
-                            className={`p-3 md:px-4 md:py-3 relative text-[14px] shadow-xl break-all max-w-full pr-7 group/msg select-text touch-manipulation cursor-pointer ${msg.senderName === username
-                              ? "bg-emerald-600 text-white rounded-2xl rounded-tr-sm"
+                            className={`p-2.5 px-3 sm:px-4 sm:py-2.5 relative text-[13.5px] sm:text-[14px] shadow-md break-words [overflow-wrap:anywhere] max-w-full pr-7 group/msg select-text touch-manipulation cursor-pointer ${msg.senderName === username
+                              ? "bg-emerald-600 text-white rounded-2xl rounded-tr-xs"
                               : msg.senderName === "AURA-OS"
-                                ? "bg-[#0f2a4a] border border-cyan-500/30 text-cyan-50 rounded-2xl rounded-tl-sm"
-                                : "bg-[#162032] border border-white/5 text-gray-200 rounded-2xl rounded-tl-sm"
+                                ? "bg-[#0f2a4a] border border-cyan-500/30 text-cyan-50 rounded-2xl rounded-tl-xs"
+                                : "bg-[#18222d] border border-white/5 text-gray-100 rounded-2xl rounded-tl-xs"
                             }`}>
                             {msg.senderName !== username && !targetId && (
                               <span className={`text-[10px] font-black uppercase tracking-tighter mb-1 block ${msg.senderName === "AURA-OS" ? "text-cyan-400" : "text-emerald-500"}`}>
@@ -4156,10 +4354,10 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
           </div>
 
           {/* Input */}
-          <div className="p-4 bg-[#090d16] border-t border-white/5 relative">
+          <div className="p-2 sm:p-3 md:p-4 bg-[#090d16] border-t border-white/5 relative z-20 w-full max-w-full overflow-hidden">
             <AnimatePresence>
               {showEmoji && (
-                <motion.div key="emoji-picker" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="absolute bottom-[80px] left-4 z-50">
+                <motion.div key="emoji-picker" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="absolute bottom-[80px] left-2 sm:left-4 z-50 max-w-[95vw]">
                   <EmojiPicker theme={"dark" as any} onEmojiClick={(e) => setInput(p => p + e.emoji)} />
                 </motion.div>
               )}
@@ -4167,7 +4365,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
 
             {/* Payment Transfer Modal */}
             {showPayModal && (
-              <div className="absolute bottom-[85px] left-4 right-4 z-50 bg-[#0c1222] border border-amber-500/30 rounded-2xl p-5 shadow-[0_0_30px_rgba(245,158,11,0.15)] backdrop-blur-sm animate-fade-in">
+              <div className="absolute bottom-[85px] left-2 right-2 sm:left-4 sm:right-4 z-50 bg-[#0c1222] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-[0_0_30px_rgba(245,158,11,0.15)] backdrop-blur-sm animate-fade-in">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2">
                     <span className="text-xl">💸</span>
@@ -4198,11 +4396,11 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                   initial={{ opacity: 0, y: 15 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 15 }}
-                  className="mb-3 mx-1 p-2.5 bg-[#111c2a] border-l-4 border-emerald-500 rounded-xl flex items-center justify-between text-xs text-gray-300 shadow-lg relative overflow-hidden"
+                  className="mb-2 mx-1 p-2 sm:p-2.5 bg-[#111c2a] border-l-4 border-emerald-500 rounded-xl flex items-center justify-between text-xs text-gray-300 shadow-lg relative overflow-hidden"
                 >
-                  <div className="flex items-center gap-3 flex-1 min-w-0 pr-4 select-none">
+                  <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0 pr-2 select-none">
                     {(replyingTo.isImage || (typeof replyingTo.text === 'string' && (replyingTo.text.startsWith('data:image') || (replyingTo.text.startsWith('http') && !replyingTo.isVideo)))) && (
-                      <div className="w-10 h-10 rounded-lg overflow-hidden shrink-0 border border-white/20">
+                      <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg overflow-hidden shrink-0 border border-white/20">
                         <img src={replyingTo.text} alt="Reply thumbnail" className="w-full h-full object-cover" />
                       </div>
                     )}
@@ -4226,22 +4424,22 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
               )}
             </AnimatePresence>
 
-            <div className="relative flex items-center w-full bg-[#050810] border border-white/10 rounded-full p-1 shadow-inner focus-within:border-emerald-500/50 transition-all">
-              <button onClick={() => setShowEmoji(!showEmoji)} className="w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 transition-all"><Smile className="w-5 h-5" /></button>
+            <div className="relative flex items-center w-full bg-[#050810] border border-white/10 rounded-full p-1 sm:p-1.5 shadow-inner focus-within:border-emerald-500/50 transition-all gap-1">
+              <button onClick={() => setShowEmoji(!showEmoji)} className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 transition-all"><Smile className="w-4 h-4 sm:w-5 sm:h-5" /></button>
 
               <input type="file" ref={fileInputRef} accept="image/*,video/*" onChange={handleMediaUpload} className="hidden" />
-              <button onClick={() => fileInputRef.current?.click()} className="w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 transition-all" title="Share image/video"><ImageIcon className="w-5 h-5" /></button>
+              <button onClick={() => fileInputRef.current?.click()} className="w-8 h-8 sm:w-10 sm:h-10 shrink-0 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 transition-all" title="Share image/video"><ImageIcon className="w-4 h-4 sm:w-5 sm:h-5" /></button>
 
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                placeholder="Type an encrypted message..."
-                className="flex-1 bg-transparent border-none outline-none px-2 text-white placeholder-gray-600 text-sm w-full"
+                placeholder="Type a message..."
+                className="flex-1 min-w-0 bg-transparent border-none outline-none px-2 text-white placeholder-gray-500 text-xs sm:text-sm"
               />
-              <button onClick={handleSend} disabled={!input.trim()} className="w-12 h-12 bg-emerald-500 rounded-full text-white flex items-center justify-center hover:bg-emerald-400 disabled:opacity-50 disabled:hover:bg-emerald-500 transition-all shadow-lg shadow-emerald-500/20">
-                <Send className="w-5 h-5 ml-1" />
+              <button onClick={handleSend} disabled={!input.trim()} className="w-9 h-9 sm:w-11 sm:h-11 shrink-0 bg-emerald-500 rounded-full text-white flex items-center justify-center hover:bg-emerald-400 disabled:opacity-40 disabled:hover:bg-emerald-500 transition-all shadow-lg shadow-emerald-500/20">
+                <Send className="w-4 h-4 sm:w-5 sm:h-5 ml-0.5" />
               </button>
             </div>
           </div>
@@ -4256,7 +4454,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
               animate={{ width: 360, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ type: "spring", damping: 30, stiffness: 200 }}
-              className="w-[360px] h-full border-l border-white/5 bg-[#090d16] flex flex-col z-30 shrink-0 overflow-y-auto scrollbar-none relative"
+              className="fixed inset-0 z-50 md:static md:w-[360px] h-full border-l border-white/5 bg-[#090d16] flex flex-col shrink-0 overflow-y-auto scrollbar-none"
             >
               {/* Drawer Header */}
               <div className="h-20 flex items-center justify-between px-6 border-b border-white/5 bg-[#090d16] shrink-0">
@@ -4653,23 +4851,49 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
 function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const [callStatus, setCallStatus] = useState("Establishing secure line...");
+  const [isConnected, setIsConnected] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [isCameraOff, setIsCameraOff] = useState(false);
+  const [isRemoteMuted, setIsRemoteMuted] = useState(false);
+
   const peerRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  // Buffer signals that arrive before peer is initialized
   const pendingSignalsRef = useRef<any[]>([]);
+
+  // Call duration counter
+  useEffect(() => {
+    let timer: any = null;
+    if (isConnected) {
+      timer = setInterval(() => setCallDuration(d => d + 1), 1000);
+    }
+    return () => { if (timer) clearInterval(timer); };
+  }, [isConnected]);
+
+  // Format seconds to mm:ss
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60).toString().padStart(2, '0');
+    const s = (secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
 
   useEffect(() => {
     let destroyed = false;
 
-    // ── Register call_accepted IMMEDIATELY before any async work ──
-    // This prevents missed signals if the remote answers quickly.
+    // Listen for remote peer mute states
+    const onRemoteMuteState = (data: any) => {
+      setIsRemoteMuted(!!data.isMuted);
+    };
+    socket.on('remote_mute_state', onRemoteMuteState);
+
     const onCallAccepted = (signal: any) => {
-      setCallStatus("Connecting...");
+      setCallStatus("Connecting audio line...");
       if (peerRef.current) {
-        peerRef.current.signal(signal);
+        try { peerRef.current.signal(signal); } catch (e) { console.warn("Signal error", e); }
       } else {
-        // Peer not ready yet — buffer the signal
         pendingSignalsRef.current.push(signal);
       }
     };
@@ -4677,21 +4901,37 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
     const getMedia = async () => {
       try {
-        return await navigator.mediaDevices.getUserMedia({ video: activeCall.isVideo !== false, audio: true });
+        return await navigator.mediaDevices.getUserMedia({
+          video: activeCall.isVideo !== false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
       } catch (e) {
-        console.warn("Failed to get video + audio, falling back to audio only:", e);
-        try {
-          return await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
-        } catch (e2) {
-          throw e2;
-        }
+        console.warn("Failed video + audio, trying audio only:", e);
+        return await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
       }
     };
 
     getMedia().then(stream => {
-      if (destroyed) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (destroyed) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
       streamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
+      }
 
       const peer = new Peer({
         initiator: activeCall.isCaller,
@@ -4702,8 +4942,6 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' },
             { urls: 'stun:global.stun.twilio.com:3478' },
             {
               urls: 'turn:openrelay.metered.ca:80',
@@ -4714,11 +4952,6 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
               urls: 'turn:openrelay.metered.ca:443',
               username: 'openrelayproject',
               credential: 'openrelayproject'
-            },
-            {
-              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-              username: 'openrelayproject',
-              credential: 'openrelayproject'
             }
           ]
         }
@@ -4726,60 +4959,115 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       peer.on('signal', (data: any) => {
         if (activeCall.isCaller) {
-          socket.emit('call_user', { userToCall: activeCall.userId, targetUsername: activeCall.username, signalData: data, from: myUsername, callerName: myUsername, isVideo: activeCall.isVideo !== false });
+          socket.emit('call_user', {
+            userToCall: activeCall.userId,
+            targetUsername: activeCall.username,
+            signalData: data,
+            from: myUsername,
+            callerName: myUsername,
+            isVideo: activeCall.isVideo !== false
+          });
         } else {
           socket.emit('answer_call', { signal: data, to: activeCall.userId });
         }
       });
 
       peer.on('stream', (remoteStream: MediaStream) => {
-        setCallStatus("Connected. Encrypted E2EE Call.");
-        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
+        if (destroyed) return;
+        setIsConnected(true);
+        setCallStatus("Connected. Encrypted Voice & Audio Active");
+
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = remoteStream;
+          remoteAudioRef.current.volume = 1.0;
+          remoteAudioRef.current.play().catch(e => console.warn("Remote audio play error:", e));
+        }
+
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(e => console.warn("Remote video play error:", e));
+        }
       });
 
       peer.on('connect', () => {
-        if (!destroyed) setCallStatus("Connected. Encrypted E2EE Call.");
+        if (!destroyed) {
+          setIsConnected(true);
+          setCallStatus("Connected. Encrypted Voice & Audio Active");
+        }
       });
 
       peer.on('error', (err: any) => {
         console.error('[WebRTC Error]', err);
-        if (!destroyed) setCallStatus("Connection failed. Check your network.");
-      });
-
-      peer.on('close', () => {
-        if (!destroyed) setCallStatus("Call ended.");
+        if (!destroyed) setCallStatus("Reconnecting secure audio line...");
       });
 
       peerRef.current = peer;
 
-      // Drain any buffered call_accepted signals that arrived before peer was ready
+      // Drain any buffered signals
       if (pendingSignalsRef.current.length > 0) {
-        pendingSignalsRef.current.forEach(sig => peer.signal(sig));
+        pendingSignalsRef.current.forEach(sig => {
+          try { peer.signal(sig); } catch (e) { console.warn(e); }
+        });
         pendingSignalsRef.current = [];
       }
 
-      // If receiver: signal the peer with the caller's initial offer
+      // If receiver: signal with caller initial signal
       if (!activeCall.isCaller && activeCall.initialSignal) {
-        peer.signal(activeCall.initialSignal);
+        try { peer.signal(activeCall.initialSignal); } catch (e) { console.warn(e); }
       }
     }).catch(err => {
       console.error('[Media Error]', err);
-      if (!destroyed) setCallStatus("Camera/Microphone access denied.");
+      if (!destroyed) setCallStatus("Microphone access denied. Please allow microphone in browser.");
     });
 
     return () => {
       destroyed = true;
       socket.off('call_accepted', onCallAccepted);
+      socket.off('remote_mute_state', onRemoteMuteState);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
       }
       if (peerRef.current) {
-        peerRef.current.destroy();
+        try { peerRef.current.destroy(); } catch (e) {}
         peerRef.current = null;
       }
     };
   }, []);
+
+  // Toggle Microphone
+  const toggleMic = () => {
+    if (streamRef.current) {
+      const audioTracks = streamRef.current.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const nextMuted = !isMicMuted;
+        audioTracks.forEach(t => { t.enabled = !nextMuted; });
+        setIsMicMuted(nextMuted);
+        socket.emit("call_mute_state", { to: activeCall.userId, isMuted: nextMuted });
+      }
+    }
+  };
+
+  // Toggle Speaker
+  const toggleSpeaker = () => {
+    if (remoteAudioRef.current) {
+      const nextSpeakerMuted = !isSpeakerMuted;
+      remoteAudioRef.current.muted = nextSpeakerMuted;
+      setIsSpeakerMuted(nextSpeakerMuted);
+    }
+  };
+
+  // Toggle Camera
+  const toggleCamera = () => {
+    if (streamRef.current) {
+      const videoTracks = streamRef.current.getVideoTracks();
+      if (videoTracks.length > 0) {
+        const nextCamOff = !isCameraOff;
+        videoTracks.forEach(t => { t.enabled = !nextCamOff; });
+        setIsCameraOff(nextCamOff);
+      }
+    }
+  };
 
   const endCall = () => {
     socket.emit("end_call", { to: activeCall.userId });
@@ -4787,43 +5075,115 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
   };
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-[#050810]/95 backdrop-blur-lg z-40 flex flex-col items-center justify-center">
-      {(callStatus === "Establishing secure line..." || callStatus === "Connecting...") && (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-[#070c18]/98 backdrop-blur-xl z-50 flex flex-col items-center justify-between p-6 sm:p-10 select-none">
+      {/* Hidden Audio Player for Remote Stream that is never display:none */}
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+
+      {!isConnected && (
         <audio autoPlay loop src="https://assets.mixkit.co/active_storage/sfx/2805/2805-preview.mp3" />
       )}
-      <h2 className="text-2xl font-bold text-white mb-2">{activeCall.username}</h2>
-      <p className="text-emerald-500 font-mono text-xs mb-8 flex items-center gap-2"><Lock className="w-3 h-3" /> {callStatus}</p>
 
+      {/* Top Header */}
+      <div className="w-full max-w-lg flex flex-col items-center gap-2 pt-4">
+        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-emerald-400 font-mono text-[11px] uppercase tracking-wider">
+          <Lock className="w-3.5 h-3.5" />
+          <span>{isConnected ? `ENCRYPTED CALL · ${formatTime(callDuration)}` : "CONNECTING SECURE TUNNEL"}</span>
+        </div>
+        <p className="text-gray-400 font-mono text-xs">{callStatus}</p>
+
+        {isRemoteMuted && (
+          <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="px-3 py-1 bg-amber-500/20 border border-amber-500/40 rounded-full text-amber-300 font-mono text-xs flex items-center gap-1.5 shadow-lg">
+            <MicOff className="w-3.5 h-3.5" />
+            <span>{activeCall.username} is muted</span>
+          </motion.div>
+        )}
+      </div>
+
+      {/* Center Display: Voice Call Avatar or Video Grid */}
       {activeCall.isVideo === false ? (
-        <div className="flex flex-col items-center justify-center p-8 bg-[#0b141a] rounded-3xl border border-white/10 shadow-2xl w-full max-w-md aspect-square mb-6">
-          <div className="relative mb-6 select-none">
-            {/* Pulsing visual wave rings */}
-            <div className="absolute inset-0 rounded-full bg-emerald-500/10 animate-ping" style={{ animationDuration: '3s' }} />
-            <div className="absolute inset-[-8px] rounded-full border-2 border-emerald-500/20 animate-pulse" />
-            
-            <div className="w-28 h-28 rounded-full border-4 border-emerald-500/80 overflow-hidden bg-[#0c1222] shadow-[0_0_40px_rgba(16,185,129,0.25)] relative z-10 flex items-center justify-center">
-              <img src={activeCall.avatarSrc || `https://api.dicebear.com/7.x/bottts/svg?seed=${activeCall.username}`} alt="Contact Avatar" className="w-full h-full object-cover" />
+        <div className="flex flex-col items-center justify-center my-auto">
+          <div className="relative mb-6">
+            {isConnected && (
+              <>
+                <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" style={{ animationDuration: '2.5s' }} />
+                <div className="absolute -inset-4 rounded-full border border-emerald-500/30 animate-pulse" />
+              </>
+            )}
+            <div className="w-32 h-32 sm:w-40 sm:h-40 rounded-full border-4 border-emerald-500/80 overflow-hidden bg-[#0c1222] shadow-[0_0_50px_rgba(16,185,129,0.3)] relative z-10 flex items-center justify-center">
+              <img
+                src={activeCall.avatarSrc || `https://api.dicebear.com/7.x/bottts/svg?seed=${activeCall.username}`}
+                alt="Avatar"
+                className="w-full h-full object-cover"
+              />
             </div>
           </div>
-          <h3 className="text-xl font-bold text-white tracking-wide">{activeCall.username}</h3>
-          <p className="text-emerald-400 font-mono text-[10px] uppercase tracking-widest mt-2 animate-pulse">{callStatus}</p>
-
-          {/* Hidden video elements to allow WebRTC streams to process */}
-          <video ref={remoteVideoRef} autoPlay playsInline className="hidden"></video>
-          <video ref={localVideoRef} autoPlay playsInline muted className="hidden"></video>
+          <h2 className="text-2xl sm:text-3xl font-black text-white tracking-wide uppercase font-mono">{activeCall.username}</h2>
+          <div className="flex items-center gap-2 mt-2">
+            <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            <span className="text-emerald-400 font-mono text-xs uppercase tracking-widest">{isConnected ? "Voice Stream Active" : "Ringing..."}</span>
+          </div>
         </div>
       ) : (
-        <div className="relative w-full max-w-4xl aspect-video bg-black rounded-3xl overflow-hidden border border-white/10 shadow-2xl">
-          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
-
-          <div className="absolute bottom-6 right-6 w-48 aspect-video bg-black rounded-xl overflow-hidden border-2 border-emerald-500 shadow-lg">
-            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover transform -scale-x-100"></video>
+        <div className="relative w-full max-w-3xl aspect-video bg-[#040711] rounded-3xl overflow-hidden border border-white/10 shadow-2xl my-auto flex items-center justify-center">
+          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+          <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-md px-3 py-1 rounded-full text-white font-mono text-xs flex items-center gap-2">
+            <span>{activeCall.username}</span>
+            {isRemoteMuted && <MicOff className="w-3.5 h-3.5 text-amber-400" />}
+          </div>
+          <div className="absolute bottom-4 right-4 w-32 sm:w-44 aspect-video bg-black rounded-2xl overflow-hidden border-2 border-emerald-500 shadow-xl">
+            <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover transform -scale-x-100" />
+            {isCameraOff && (
+              <div className="absolute inset-0 bg-[#090d16] flex items-center justify-center text-gray-500 text-xs font-mono">
+                Camera Off
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      <div className="mt-8 flex gap-6">
-        <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-[0_0_30px_rgba(239,68,68,0.4)] transition-all">
+      {/* Bottom Control Bar */}
+      <div className="w-full max-w-md pb-6 flex items-center justify-center gap-4 sm:gap-6">
+        {/* Mic Mute Button */}
+        <button
+          onClick={toggleMic}
+          className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all shadow-lg ${
+            isMicMuted ? 'bg-red-500/20 border-2 border-red-500 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.3)]' : 'bg-white/10 border border-white/15 text-white hover:bg-white/20'
+          }`}
+          title={isMicMuted ? "Unmute Mic" : "Mute Mic"}
+        >
+          {isMicMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+        </button>
+
+        {/* Speaker Button */}
+        <button
+          onClick={toggleSpeaker}
+          className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all shadow-lg ${
+            isSpeakerMuted ? 'bg-amber-500/20 border-2 border-amber-500 text-amber-400' : 'bg-white/10 border border-white/15 text-white hover:bg-white/20'
+          }`}
+          title={isSpeakerMuted ? "Unmute Speaker" : "Mute Speaker"}
+        >
+          {isSpeakerMuted ? <VolumeX className="w-6 h-6" /> : <Volume2 className="w-6 h-6" />}
+        </button>
+
+        {/* Video Toggle if video call */}
+        {activeCall.isVideo !== false && (
+          <button
+            onClick={toggleCamera}
+            className={`w-14 h-14 rounded-full flex flex-col items-center justify-center transition-all shadow-lg ${
+              isCameraOff ? 'bg-amber-500/20 border-2 border-amber-500 text-amber-400' : 'bg-white/10 border border-white/15 text-white hover:bg-white/20'
+            }`}
+            title={isCameraOff ? "Turn Camera On" : "Turn Camera Off"}
+          >
+            {isCameraOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
+          </button>
+        )}
+
+        {/* End Call Button - ONLY Ends when clicked */}
+        <button
+          onClick={endCall}
+          className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 text-white flex items-center justify-center shadow-[0_0_35px_rgba(239,68,68,0.6)] hover:scale-105 active:scale-95 transition-all"
+          title="End Call"
+        >
           <Phone className="w-8 h-8 rotate-[135deg]" />
         </button>
       </div>

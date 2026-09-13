@@ -1763,10 +1763,10 @@ io.on("connection", (socket) => {
             call.startTime = Date.now();
             call.established = true;
 
-            // Cancel incoming_call on all OTHER sockets of the same receiver (they picked up on one tab)
+            // Dismiss incoming_call banner on all OTHER sockets of the same receiver (do NOT emit call_ended!)
             for (const [sid, u] of activeUsers.entries()) {
                 if (u.username === call.receiverUsername && sid !== socket.id) {
-                    io.to(sid).emit("call_ended");
+                    io.to(sid).emit("incoming_call_dismissed");
                 }
             }
         }
@@ -1776,8 +1776,15 @@ io.on("connection", (socket) => {
         io.to(targetSocketId).emit("call_accepted", data.signal);
     });
 
+    socket.on("call_mute_state", (data) => {
+        // data: { to, isMuted }
+        if (data.to) {
+            io.to(data.to).emit("remote_mute_state", { isMuted: !!data.isMuted, from: socket.id });
+        }
+    });
+
     socket.on("end_call", () => {
-        handleEndCall(socket.id);
+        handleEndCall(socket.id, true);
     });
 
     socket.on("disconnect", () => {
@@ -1787,7 +1794,19 @@ io.on("connection", (socket) => {
             saveDb();
         }
         
-        handleEndCall(socket.id);
+        // Only end call after grace period on disconnect, or if call was never established
+        const activeC = ongoingCalls.get(socket.id);
+        if (activeC && !activeC.established) {
+            handleEndCall(socket.id, true);
+        } else if (activeC && activeC.established) {
+            setTimeout(() => {
+                // If user is still not connected after 8s, end call
+                const isBack = Array.from(activeUsers.values()).some(u => u.username === (user ? user.username : ''));
+                if (!isBack) {
+                    handleEndCall(socket.id, true);
+                }
+            }, 8000);
+        }
 
         activeUsers.delete(socket.id);
         broadcastUsers();
