@@ -754,8 +754,24 @@ io.on("connection", (socket) => {
                         }
 
                         if (!aiReply) {
-                            if (text.includes("who built you") || text.includes("who is your founder") || text.includes("who made you") || text.includes("who created you") || text.includes("who built") || text.includes("who made")) {
-                                aiReply = "I architected by Ashfaq and my position Fullstack Web Developer. Ashfaq is a highly skilled full-stack developer specialized in building modern web applications, real-time communications, and immersive gaming experiences. He created me to showcase his advanced capabilities.";
+                            const lowerText = text.toLowerCase();
+                            const isFounderQuery = lowerText.includes("founder") ||
+                                lowerText.includes("who built") ||
+                                lowerText.includes("who made") ||
+                                lowerText.includes("who created") ||
+                                lowerText.includes("who developed") ||
+                                lowerText.includes("who is ashfaq") ||
+                                lowerText.includes("ashfaq") ||
+                                lowerText.includes("who is the architect") ||
+                                lowerText.includes("who architected") ||
+                                lowerText.includes("who is your creator") ||
+                                lowerText.includes("who is your founder") ||
+                                lowerText.includes("who owns this") ||
+                                lowerText.includes("who runs this") ||
+                                lowerText.includes("tell me about the creator");
+
+                            if (isFounderQuery) {
+                                aiReply = "I was architected and built by Ashfaq, the Founder and Lead Fullstack Software Architect of SonicBots (https://sonicbots.vercel.app). Ashfaq is a skilled full-stack web developer and real-time systems engineer who designed and engineered the entire SonicBots platform, including our encrypted WebRTC voice and video calling network, autonomous neural AI agents, and multiplayer gaming engines.";
                             } else {
                                 try {
                                     if (aiModel) {

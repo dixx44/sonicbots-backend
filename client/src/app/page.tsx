@@ -6263,16 +6263,17 @@ function DiscordDevHub({ socket, username, nicknames, qaMessages, setQaMessages,
       ? COMMUNITY_MEMBERS.find(m => m.name.toLowerCase() === mentionedName.toLowerCase())
       : null;
 
-    if (query.includes("founder") || query.includes("who is ashfaq") || query.includes("admin") || query.includes("creator") || query.includes("built this") || query.includes("made this")) {
+    if (query.includes("founder") || query.includes("who is ashfaq") || query.includes("ashfaq") || query.includes("admin") || query.includes("creator") || query.includes("built this") || query.includes("made this") || query.includes("who built") || query.includes("who made")) {
       chosenReplier = members[0];
-      thoughtText = `1. Analyzing query intent: Identify Aura OS core architect.\n2. Checking administrator index...\n3. Found match: "Ashfaq" (Founder / Admin).\n4. Retrieving clearance profiles and system roles...\n5. Synthesizing origin log...`;
-      replyText = `### Founder & Lead Architect: **Ashfaq** (Founder / Admin)
-**Ashfaq** is the founder, lead systems architect, and root administrator of the **AURA-OS** ecosystem. 
+      thoughtText = `1. Analyzing query intent: Identify SonicBots core architect.\n2. Checking administrator index...\n3. Found match: "Ashfaq" (Founder & Lead Fullstack Architect).\n4. Retrieving clearance profiles and system roles...\n5. Synthesizing origin log...`;
+      replyText = `### Founder & Lead Fullstack Architect: **Ashfaq**
+**Ashfaq** is the founder, chief full-stack architect, and root administrator of **SonicBots** ([sonicbots.vercel.app](https://sonicbots.vercel.app)).
 
-Under his direction, the following core specifications have been implemented:
-* **Sonic & Facial Security**: Dual-mode biometric portals (2D facial scan and frequency-analyzed sonic clap auth).
-* **Multiplayer Neural Grid**: High-stakes Ludo rooms requiring a minimum of **500 LKR** stakes to play.
-* **Aura Social Matrix**: Real-time Node.js socket relays running on port 5000, secure peer-to-peer WebRTC audio/video calls, and simulated community scenarios.`;
+Under his vision and architectural leadership:
+* **Real-time WebRTC Voice & Video**: Encrypted peer-to-peer audio & video communications with STUN/TURN fallback.
+* **Sonic & Facial Biometrics**: Dual-mode biometric security with 2D facial scanning and frequency-analyzed acoustic auth.
+* **Multiplayer Neural Gaming**: Interactive multi-stake Ludo grid with synchronized state machines.
+* **Autonomous AI Agents**: 20+ neural conversational AI bots trained for real-time collaboration.`;
     } else if (query.includes("compare") || query.includes("data") || query.includes("database") || query.includes("my stat") || query.includes("profile")) {
       chosenReplier = members[0];
       thoughtText = `1. Parsing token: "compare data"\n2. Pulling session username: "${username}"\n3. Loading root record: "Ashfaq"\n4. Structuring comparison metrics (Wallet, inventory, status)...\n5. Rendering formatted Markdown output table...`;
