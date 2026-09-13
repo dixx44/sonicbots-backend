@@ -4855,6 +4855,32 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isRemoteMuted, setIsRemoteMuted] = useState(false);
+  const [micBlocked, setMicBlocked] = useState(false);
+
+  // Retry acquiring microphone if user unlocks permissions in browser
+  const requestMicAgain = async () => {
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      const newTrack = newStream.getAudioTracks()[0];
+      if (newTrack && peerRef.current) {
+        const oldTrack = streamRef.current?.getAudioTracks()[0];
+        if (oldTrack) {
+          peerRef.current.replaceTrack(oldTrack, newTrack, streamRef.current);
+          oldTrack.stop();
+        } else {
+          peerRef.current.addTrack(newTrack, streamRef.current);
+        }
+        streamRef.current = newStream;
+        setMicBlocked(false);
+        setIsMicMuted(false);
+        setCallStatus("Connected. Encrypted Voice & Audio Active");
+      }
+    } catch (e) {
+      alert("Microphone is still blocked. Please click the icon next to the URL in your browser address bar, set Microphone to 'Allow', and click Enable Mic again.");
+    }
+  };
 
   const peerRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -4905,6 +4931,23 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
     };
     socket.on('relay_signal', onRelaySignal);
 
+    const createSilentAudioStream = (): MediaStream => {
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          const ctx = new AudioContextClass();
+          const osc = ctx.createOscillator();
+          const dst = ctx.createMediaStreamDestination();
+          osc.connect(dst);
+          osc.start();
+          const track = dst.stream.getAudioTracks()[0];
+          if (track) track.enabled = false;
+          return dst.stream;
+        }
+      } catch (err) {}
+      return new MediaStream();
+    };
+
     const getMedia = async () => {
       try {
         return await navigator.mediaDevices.getUserMedia({
@@ -4917,14 +4960,21 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
         });
       } catch (e) {
         console.warn("Failed video + audio, trying audio only:", e);
-        return await navigator.mediaDevices.getUserMedia({
-          video: false,
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
-        });
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+        } catch (e2) {
+          console.warn("Microphone access denied/busy, falling back to listening-only stream:", e2);
+          setMicBlocked(true);
+          setCallStatus("Microphone blocked in browser. Listening mode active.");
+          return createSilentAudioStream();
+        }
       }
     };
 
@@ -5074,6 +5124,10 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
   // Toggle Microphone
   const toggleMic = () => {
+    if (micBlocked) {
+      requestMicAgain();
+      return;
+    }
     if (streamRef.current) {
       const audioTracks = streamRef.current.getAudioTracks();
       if (audioTracks.length > 0) {
@@ -5187,6 +5241,29 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
             )}
           </div>
         </div>
+      )}
+
+      {/* Blocked mic warning banner */}
+      {micBlocked && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-sm mb-3 bg-amber-500/20 border border-amber-500/50 rounded-2xl p-3 flex flex-col items-center text-center gap-1.5 shadow-xl"
+        >
+          <div className="flex items-center gap-1.5 text-amber-300 font-mono text-xs font-bold">
+            <MicOff className="w-4 h-4 text-amber-400" />
+            <span>Microphone Blocked By Browser</span>
+          </div>
+          <p className="text-[11px] text-gray-300">
+            Click the lock/settings icon in your browser URL bar to allow microphone, then click:
+          </p>
+          <button
+            onClick={requestMicAgain}
+            className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-mono font-bold text-xs rounded-xl shadow-lg transition-all uppercase tracking-wider"
+          >
+            🎙️ Enable Microphone
+          </button>
+        </motion.div>
       )}
 
       {/* Bottom Control Bar */}
