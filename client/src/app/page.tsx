@@ -4884,6 +4884,8 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isRemoteMuted, setIsRemoteMuted] = useState(false);
   const [micBlocked, setMicBlocked] = useState(false);
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const audioCtxRef = useRef<any>(null);
 
   // Retry acquiring microphone if user unlocks permissions in browser
   const requestMicAgain = async () => {
@@ -5024,9 +5026,10 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
 
       const peer = new Peer({
         initiator: activeCall.isCaller,
-        trickle: false,
+        trickle: true,
         stream: stream,
         config: {
+          iceTransportPolicy: 'all',
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
@@ -5034,8 +5037,15 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
             { urls: 'stun:global.stun.twilio.com:3478' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:openrelay.metered.ca:80' },
             {
               urls: 'turn:openrelay.metered.ca:80',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:80?transport=tcp',
               username: 'openrelayproject',
               credential: 'openrelayproject'
             },
@@ -5046,11 +5056,6 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
             },
             {
               urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-              username: 'openrelayproject',
-              credential: 'openrelayproject'
-            },
-            {
-              urls: 'turns:openrelay.metered.ca:443',
               username: 'openrelayproject',
               credential: 'openrelayproject'
             }
@@ -5084,74 +5089,95 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
       peer.on('stream', (remoteStream: MediaStream) => {
         if (destroyed) return;
         setIsConnected(true);
-        setCallStatus("Connected. Encrypted Voice & Audio Active");
+        setCallStatus("Connected · Voice Active");
 
-        // Force enable all audio tracks
-        remoteStream.getAudioTracks().forEach(track => {
-          track.enabled = true;
-        });
+        // Enable all remote audio tracks
+        remoteStream.getAudioTracks().forEach(track => { track.enabled = true; });
 
-        // 1. Voice call: route strictly through dedicated audio element with mobile autoplay unlock
-        if (activeCall.isVideo === false) {
-          if (remoteAudioRef.current) {
-            remoteAudioRef.current.srcObject = remoteStream;
-            remoteAudioRef.current.volume = 1.0;
-            remoteAudioRef.current.muted = false;
-            const playPromise = remoteAudioRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise.catch((e) => {
-                console.warn("Autoplay policy blocked remote audio, enabling tap unlock:", e);
-                const unlock = () => {
-                  remoteAudioRef.current?.play().catch(() => {});
-                  document.removeEventListener('click', unlock);
-                  document.removeEventListener('touchstart', unlock);
-                };
-                document.addEventListener('click', unlock, { once: true });
-                document.addEventListener('touchstart', unlock, { once: true });
-              });
+        // 1. Play through HTML5 Audio element
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = remoteStream;
+          remoteAudioRef.current.volume = 1.0;
+          remoteAudioRef.current.muted = false;
+          const playPromise = remoteAudioRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise.catch((e) => {
+              console.warn("Audio autoplay blocked by browser policy:", e);
+              setNeedsAudioUnlock(true);
+            });
+          }
+        }
+
+        // 2. Play through HTML5 Video element (iOS Safari playsinline fallback)
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.volume = 1.0;
+          remoteVideoRef.current.muted = false;
+          const playPromise = remoteVideoRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {
+              setNeedsAudioUnlock(true);
+            });
+          }
+        }
+
+        // 3. Web Audio API hardware audio sink (routes directly to mobile loudspeaker)
+        try {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioContextClass) {
+            if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+              audioCtxRef.current = new AudioContextClass();
             }
+            if (audioCtxRef.current.state === 'suspended') {
+              audioCtxRef.current.resume();
+            }
+            const srcNode = audioCtxRef.current.createMediaStreamSource(remoteStream);
+            srcNode.connect(audioCtxRef.current.destination);
           }
-        } else {
-          // 2. Video call: play through remote video element
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
-            remoteVideoRef.current.volume = 1.0;
-            remoteVideoRef.current.muted = false;
-            remoteVideoRef.current.play().catch(e => console.warn("Remote video play error:", e));
-          }
+        } catch (err) {
+          console.warn("[WebRTC] WebAudio sink error:", err);
         }
       });
 
       peer.on('connect', () => {
         if (!destroyed) {
           setIsConnected(true);
-          setCallStatus("Connected. Encrypted Voice & Audio Active");
+          setCallStatus("Connected · Voice Active");
         }
       });
 
       peer.on('error', (err: any) => {
         console.error('[WebRTC Error]', err);
-        if (!destroyed) setCallStatus("Reconnecting secure audio line...");
+        if (!destroyed) setCallStatus("Finding best audio route...");
       });
 
       peerRef.current = peer;
 
-      // Drain any buffered signals (both local and top-level buffered signals)
-      const allPending = [...(pendingSignalsRef.current || []), ...(pendingRelaySignalsRef?.current || [])];
-      if (pendingRelaySignalsRef && pendingRelaySignalsRef.current) {
-        pendingRelaySignalsRef.current = [];
-      }
-      if (allPending.length > 0) {
-        allPending.forEach(sig => {
-          try { peer.signal(sig); } catch (e) { console.warn(e); }
-        });
-        pendingSignalsRef.current = [];
+      // 1. If receiver: apply caller's initial SDP offer FIRST so peer has remote description
+      if (!activeCall.isCaller && activeCall.initialSignal) {
+        try {
+          peer.signal(activeCall.initialSignal);
+        } catch (e) {
+          console.warn("[WebRTC] Initial signal error:", e);
+        }
       }
 
-      // If receiver: signal with caller initial signal
-      if (!activeCall.isCaller && activeCall.initialSignal) {
-        try { peer.signal(activeCall.initialSignal); } catch (e) { console.warn(e); }
-      }
+      // 2. Drain buffered candidate signals ONLY AFTER the initial SDP offer is applied
+      setTimeout(() => {
+        if (destroyed || !peerRef.current) return;
+        const allPending = [...(pendingSignalsRef.current || []), ...(pendingRelaySignalsRef?.current || [])];
+        if (pendingRelaySignalsRef && pendingRelaySignalsRef.current) {
+          pendingRelaySignalsRef.current = [];
+        }
+        pendingSignalsRef.current = [];
+        allPending.forEach(sig => {
+          try {
+            peerRef.current?.signal(sig);
+          } catch (e) {
+            console.warn("[WebRTC] Drained signal error:", e);
+          }
+        });
+      }, 80);
     }).catch(err => {
       console.error('[Media Error]', err);
       if (!destroyed) setCallStatus("Microphone access denied. Please allow microphone in browser.");
@@ -5192,6 +5218,9 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
 
   // Toggle Speaker
   const toggleSpeaker = () => {
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
     const nextSpeakerMuted = !isSpeakerMuted;
     if (remoteAudioRef.current) {
       remoteAudioRef.current.muted = nextSpeakerMuted;
@@ -5226,7 +5255,11 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
 
       {/* Hidden local video element during voice calls so WebRTC audio pipeline is never paused by mobile browsers */}
       {activeCall.isVideo === false && (
-        <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+        <>
+          {/* Hidden video — iOS Safari plays WebRTC audio through <video playsInline> more reliably */}
+          <video ref={remoteVideoRef} autoPlay playsInline style={{ position: 'fixed', bottom: 0, left: 0, width: '1px', height: '1px', opacity: 0.01, pointerEvents: 'none' }} />
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+        </>
       )}
 
       {!isConnected && activeCall.isCaller && (
@@ -5272,6 +5305,27 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
             <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
             <span className="text-emerald-400 font-mono text-xs uppercase tracking-widest">{isConnected ? "Voice Stream Active" : "Ringing..."}</span>
           </div>
+
+          {/* Pulsating Tap to Hear Audio Button if browser autoplay blocked it */}
+          {needsAudioUnlock && (
+            <motion.button
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                remoteAudioRef.current?.play().catch(() => {});
+                remoteVideoRef.current?.play().catch(() => {});
+                if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+                  audioCtxRef.current.resume();
+                }
+                setNeedsAudioUnlock(false);
+              }}
+              className="mt-4 px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs font-mono rounded-full shadow-[0_0_25px_rgba(16,185,129,0.7)] animate-bounce uppercase tracking-wider flex items-center gap-2 cursor-pointer z-50"
+            >
+              <Volume2 className="w-4 h-4" />
+              <span>🔊 Tap to Hear Friend's Voice</span>
+            </motion.button>
+          )}
         </div>
       ) : (
         <div className="relative w-full max-w-3xl aspect-video bg-[#040711] rounded-3xl overflow-hidden border border-white/10 shadow-2xl my-auto flex items-center justify-center">
