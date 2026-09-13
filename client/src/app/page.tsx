@@ -1139,6 +1139,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
   const [lastMessageMap, setLastMessageMap] = useState<Record<string, number>>({});
   const [incomingCall, setIncomingCall] = useState<{ signal: any, from: string, callerName: string, callerAvatar?: string, isVideo?: boolean } | null>(null);
   const [activeCall, setActiveCall] = useState<{ userId: string, username: string, avatarSrc?: string, isCaller: boolean, isAi?: boolean, initialSignal?: any, isVideo?: boolean } | null>(null);
+  const pendingRelaySignalsRef = useRef<any[]>([]);
   const [incomingLudoInvites, setIncomingLudoInvites] = useState<any[]>([]);
   const [systemStats, setSystemStats] = useState({ totalMessages: 0, aiInterventions: 0, activeCalls: 0 });
   const [toast, setToast] = useState<{ id: string, name: string, text: string } | null>(null);
@@ -1375,6 +1376,12 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       setIncomingCall(data);
     });
 
+    socket.on("relay_signal", (data) => {
+      if (data && data.signal) {
+        pendingRelaySignalsRef.current.push(data.signal);
+      }
+    });
+
     socket.on("ludo_invite_received", (data) => {
       setIncomingLudoInvites(prev => {
         if (prev.find(i => i.roomId === data.roomId)) return prev;
@@ -1487,6 +1494,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       socket.off("update_users");
       socket.off("update_stats");
       socket.off("incoming_call");
+      socket.off("relay_signal");
       socket.off("ludo_invite_received");
       socket.off("call_ended");
       socket.off("receive_call_logs");
@@ -1591,7 +1599,25 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
     };
   }, [socket, isSimulationEnabled]);
 
+  // Audio context unlock helper for mobile browsers (runs synchronously during user tap)
+  const unlockAudioContext = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.001; // virtually silent
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(0);
+        osc.stop(ctx.currentTime + 0.05);
+      }
+    } catch (e) {}
+  };
+
   const startCall = (user: any, isVideo: boolean = true) => {
+    unlockAudioContext();
     // 1. Check if the target is an active real online user connected to socket
     const currentOnlineUser = onlineUsers.find((u: any) => 
       (u.username === user.username || u.id === user.id) && 
@@ -1631,6 +1657,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
 
   const acceptCall = () => {
     if (!incomingCall) return;
+    unlockAudioContext();
     const avatarSrc = getAvatarSrc(incomingCall.callerName, incomingCall.callerAvatar);
     setActiveCall({ 
       userId: incomingCall.from, 
@@ -2194,6 +2221,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
                 activeCall={activeCall}
                 myUsername={username}
                 onEnd={() => setActiveCall(null)}
+                pendingRelaySignalsRef={pendingRelaySignalsRef}
               />
             )
           )}
@@ -4844,7 +4872,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
   );
 }
 
-function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
+function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRelaySignalsRef }: any) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
@@ -4970,10 +4998,15 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
             }
           });
         } catch (e2) {
-          console.warn("Microphone access denied/busy, falling back to listening-only stream:", e2);
-          setMicBlocked(true);
-          setCallStatus("Microphone blocked in browser. Listening mode active.");
-          return createSilentAudioStream();
+          // Fallback to basic audio without constraints for strict mobile browsers
+          try {
+            return await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+          } catch (e3) {
+            console.warn("Microphone access denied/busy, falling back to listening-only stream:", e3);
+            setMicBlocked(true);
+            setCallStatus("Microphone blocked in browser. Listening mode active.");
+            return createSilentAudioStream();
+          }
         }
       }
     };
@@ -4991,13 +5024,16 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       const peer = new Peer({
         initiator: activeCall.isCaller,
-        trickle: true,
+        trickle: false,
         stream: stream,
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
             {
               urls: 'turn:openrelay.metered.ca:80',
               username: 'openrelayproject',
@@ -5024,7 +5060,6 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       peer.on('signal', (data: any) => {
         if (activeCall.isCaller) {
-          // First signal is the SDP offer — send via call_user; subsequent are ICE candidates
           if (data.type === 'offer') {
             socket.emit('call_user', {
               userToCall: activeCall.userId,
@@ -5035,11 +5070,9 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
               isVideo: activeCall.isVideo !== false
             });
           } else {
-            // Trickle ICE candidate or renegotiation — relay directly
             socket.emit('relay_signal', { to: activeCall.userId, signal: data });
           }
         } else {
-          // Receiver: first signal is the SDP answer, rest are ICE candidates
           if (data.type === 'answer') {
             socket.emit('answer_call', { signal: data, to: activeCall.userId });
           } else {
@@ -5058,20 +5091,34 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
           track.enabled = true;
         });
 
-        // 1. Play through remote audio element
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.volume = 1.0;
-          remoteAudioRef.current.muted = false;
-          remoteAudioRef.current.play().catch(e => console.warn("Remote audio play error:", e));
-        }
-
-        // 2. Play through remote video element (WebRTC audio sink for mobile browsers)
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.volume = 1.0;
-          remoteVideoRef.current.muted = false;
-          remoteVideoRef.current.play().catch(e => console.warn("Remote video play error:", e));
+        // 1. Voice call: route strictly through dedicated audio element with mobile autoplay unlock
+        if (activeCall.isVideo === false) {
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteStream;
+            remoteAudioRef.current.volume = 1.0;
+            remoteAudioRef.current.muted = false;
+            const playPromise = remoteAudioRef.current.play();
+            if (playPromise !== undefined) {
+              playPromise.catch((e) => {
+                console.warn("Autoplay policy blocked remote audio, enabling tap unlock:", e);
+                const unlock = () => {
+                  remoteAudioRef.current?.play().catch(() => {});
+                  document.removeEventListener('click', unlock);
+                  document.removeEventListener('touchstart', unlock);
+                };
+                document.addEventListener('click', unlock, { once: true });
+                document.addEventListener('touchstart', unlock, { once: true });
+              });
+            }
+          }
+        } else {
+          // 2. Video call: play through remote video element
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = remoteStream;
+            remoteVideoRef.current.volume = 1.0;
+            remoteVideoRef.current.muted = false;
+            remoteVideoRef.current.play().catch(e => console.warn("Remote video play error:", e));
+          }
         }
       });
 
@@ -5089,9 +5136,13 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       peerRef.current = peer;
 
-      // Drain any buffered signals
-      if (pendingSignalsRef.current.length > 0) {
-        pendingSignalsRef.current.forEach(sig => {
+      // Drain any buffered signals (both local and top-level buffered signals)
+      const allPending = [...(pendingSignalsRef.current || []), ...(pendingRelaySignalsRef?.current || [])];
+      if (pendingRelaySignalsRef && pendingRelaySignalsRef.current) {
+        pendingRelaySignalsRef.current = [];
+      }
+      if (allPending.length > 0) {
+        allPending.forEach(sig => {
           try { peer.signal(sig); } catch (e) { console.warn(e); }
         });
         pendingSignalsRef.current = [];
@@ -5171,17 +5222,14 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-[#070c18]/98 backdrop-blur-xl z-50 flex flex-col items-center justify-between p-6 sm:p-10 select-none">
       {/* Remote Audio Player */}
-      <audio ref={remoteAudioRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ position: 'fixed', bottom: 0, left: 0, width: '1px', height: '1px', opacity: 0.01, pointerEvents: 'none' }} />
 
-      {/* Hidden video elements during voice calls so WebRTC audio pipeline is never paused by mobile browsers */}
+      {/* Hidden local video element during voice calls so WebRTC audio pipeline is never paused by mobile browsers */}
       {activeCall.isVideo === false && (
-        <>
-          <video ref={remoteVideoRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
-          <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
-        </>
+        <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
       )}
 
-      {!isConnected && (
+      {!isConnected && activeCall.isCaller && (
         <audio autoPlay loop src="https://assets.mixkit.co/active_storage/sfx/2805/2805-preview.mp3" />
       )}
 

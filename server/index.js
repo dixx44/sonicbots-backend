@@ -1760,8 +1760,22 @@ io.on("connection", (socket) => {
         socket.emit("receive_call_logs", logs);
     });
 
+    const resolveTargetSid = (target) => {
+        if (!target) return null;
+        if (activeUsers.has(target)) return target;
+        for (const [sid, u] of activeUsers.entries()) {
+            if (u.username && u.username.toLowerCase() === String(target).toLowerCase()) {
+                return sid;
+            }
+            if (u.id && String(u.id) === String(target)) {
+                return sid;
+            }
+        }
+        return target;
+    };
+
     socket.on("answer_call", (data) => {
-        // data: { signal, to } — 'to' is the caller's socket ID
+        // data: { signal, to } — 'to' is the caller's socket ID or username
         const call = ongoingCalls.get(socket.id);
         console.log(`[CALL] answer_call from ${socket.id} | call:`, call ? `${call.callerUsername}->${call.receiverUsername}` : 'NOT FOUND');
         if (call) {
@@ -1776,23 +1790,27 @@ io.on("connection", (socket) => {
             }
         }
         // Send the answer signal back to the actual caller socket
-        const targetSocketId = (call && call.callerSocketId) ? call.callerSocketId : data.to;
+        const targetSocketId = (call && call.callerSocketId) ? call.callerSocketId : resolveTargetSid(data.to);
         console.log(`[CALL] Sending call_accepted to caller socket: ${targetSocketId}`);
-        io.to(targetSocketId).emit("call_accepted", data.signal);
+        if (targetSocketId) {
+            io.to(targetSocketId).emit("call_accepted", data.signal);
+        }
     });
 
     socket.on("call_mute_state", (data) => {
         // data: { to, isMuted }
-        if (data.to) {
-            io.to(data.to).emit("remote_mute_state", { isMuted: !!data.isMuted, from: socket.id });
+        if (data && data.to) {
+            const sid = resolveTargetSid(data.to);
+            if (sid) io.to(sid).emit("remote_mute_state", { isMuted: !!data.isMuted, from: socket.id });
         }
     });
 
     // Relay trickle ICE candidates after the initial offer/answer
     socket.on("relay_signal", (data) => {
         // data: { to, signal }
-        if (data.to && data.signal) {
-            io.to(data.to).emit("relay_signal", { signal: data.signal, from: socket.id });
+        if (data && data.to && data.signal) {
+            const sid = resolveTargetSid(data.to);
+            if (sid) io.to(sid).emit("relay_signal", { signal: data.signal, from: socket.id });
         }
     });
 
