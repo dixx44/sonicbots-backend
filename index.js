@@ -1709,10 +1709,15 @@ io.on("connection", (socket) => {
         // Clear any stale call entries for this caller
         ongoingCalls.set(socket.id, call);
         
-        // Find all active sockets for the receiver by username and send them the call
+        // Find all active sockets for the receiver by socket ID OR case-insensitive username
         let callSent = false;
         for (const [sid, u] of activeUsers.entries()) {
-            if (u.username === receiverUsername && sid !== socket.id) {
+            const isMatch = (data.userToCall && sid === data.userToCall) ||
+                            (u.username && receiverUsername && u.username.toLowerCase() === receiverUsername.toLowerCase()) ||
+                            (u.id && data.userToCall && u.id === data.userToCall) ||
+                            (u.username && data.userToCall && u.username.toLowerCase() === String(data.userToCall).toLowerCase());
+
+            if (isMatch && sid !== socket.id) {
                 ongoingCalls.set(sid, call);
                 io.to(sid).emit("incoming_call", {
                     from: socket.id,
