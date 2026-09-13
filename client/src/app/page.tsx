@@ -1592,40 +1592,35 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
   }, [socket, isSimulationEnabled]);
 
   const startCall = (user: any, isVideo: boolean = true) => {
-    const currentOnlineUser = onlineUsers.find((u: any) => u.username === user.username);
+    // 1. Check if the target is an active real online user connected to socket
+    const currentOnlineUser = onlineUsers.find((u: any) => 
+      (u.username === user.username || u.id === user.id) && 
+      !u.isVirtual && 
+      !String(u.id).startsWith("virtual_") && 
+      !String(u.id).startsWith("agent_")
+    );
     const actualTargetId = currentOnlineUser ? currentOnlineUser.id : user.id;
     const avatarSrc = getAvatarSrc(user.username, user.avatar);
-    const isAi = (actualTargetId && String(actualTargetId).startsWith("agent_")) ||
-                 (user.id && String(user.id).startsWith("agent_")) ||
-                 (user.username && (
-                   user.username === "AURA-OS" ||
-                   user.username.includes("Alpha") ||
-                   user.username.includes("Nova") ||
-                   user.username.includes("Cyber") ||
-                   user.username.includes("Vortex") ||
-                   user.username.includes("Luna") ||
-                   user.username.includes("Shadow") ||
-                   user.username.includes("Zenith") ||
-                   user.username.includes("Pulse") ||
-                   user.username.includes("Titan") ||
-                   user.username.includes("Echo") ||
-                   user.username.includes("Solar") ||
-                   user.username.includes("Matrix") ||
-                   user.username.includes("Blaze") ||
-                   user.username.includes("Prism") ||
-                   user.username.includes("Omega") ||
-                   user.username.includes("Ghost") ||
-                   user.username.includes("Rift") ||
-                   user.username.includes("Flux") ||
-                   user.username.includes("Void") ||
-                   user.username.includes("Neon") ||
-                   user.username.toLowerCase().includes("bot") ||
-                   user.username.toLowerCase().includes("agent")
-                 )) ||
-                 (user.about && user.about.toLowerCase().includes("neural"));
+
+    // Is this a real human online user? If so, it is ALWAYS a real call (never AI).
+    const isRealOnlineUser = !!currentOnlineUser || (
+      actualTargetId && 
+      !String(actualTargetId).startsWith("virtual_") && 
+      !String(actualTargetId).startsWith("agent_") && 
+      !user.isBot && 
+      !user.isVirtual
+    );
+
+    // AI Voice Call Interface is ONLY for AI Chat Agents (Titan-Shell, DevBot, etc.) when they are NOT real socket users
+    const isAi = !isRealOnlineUser && (
+      (actualTargetId && String(actualTargetId).startsWith("agent_")) ||
+      (user.id && (String(user.id).startsWith("agent_") || String(user.id).startsWith("virtual_"))) ||
+      user.isBot ||
+      user.isVirtual
+    );
 
     setActiveCall({ 
-      userId: actualTargetId || user.id || `agent_${user.username}`, 
+      userId: actualTargetId || user.id, 
       username: user.username, 
       avatarSrc,
       isCaller: true, 
@@ -1642,6 +1637,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       username: incomingCall.callerName, 
       avatarSrc,
       isCaller: false, 
+      isAi: false,
       initialSignal: incomingCall.signal,
       isVideo: incomingCall.isVideo 
     });
@@ -5007,28 +5003,24 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
         setIsConnected(true);
         setCallStatus("Connected. Encrypted Voice & Audio Active");
 
-        // Try the ref element first; fall back to a standalone Audio object if autoplay is blocked
+        // Force enable all audio tracks
+        remoteStream.getAudioTracks().forEach(track => {
+          track.enabled = true;
+        });
+
+        // 1. Play through remote audio element
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStream;
           remoteAudioRef.current.volume = 1.0;
           remoteAudioRef.current.muted = false;
-          remoteAudioRef.current.play().catch(() => {
-            // Autoplay was blocked — use a detached Audio element instead
-            const fallbackAudio = new Audio();
-            (fallbackAudio as any).srcObject = remoteStream;
-            fallbackAudio.volume = 1.0;
-            fallbackAudio.play().catch(e => console.warn("Audio fallback also failed:", e));
-          });
-        } else {
-          // No ref available — use detached Audio element
-          const fallbackAudio = new Audio();
-          (fallbackAudio as any).srcObject = remoteStream;
-          fallbackAudio.volume = 1.0;
-          fallbackAudio.play().catch(e => console.warn("Audio fallback failed:", e));
+          remoteAudioRef.current.play().catch(e => console.warn("Remote audio play error:", e));
         }
 
+        // 2. Play through remote video element (WebRTC audio sink for mobile browsers)
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.volume = 1.0;
+          remoteVideoRef.current.muted = false;
           remoteVideoRef.current.play().catch(e => console.warn("Remote video play error:", e));
         }
       });
@@ -5095,11 +5087,14 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
   // Toggle Speaker
   const toggleSpeaker = () => {
+    const nextSpeakerMuted = !isSpeakerMuted;
     if (remoteAudioRef.current) {
-      const nextSpeakerMuted = !isSpeakerMuted;
       remoteAudioRef.current.muted = nextSpeakerMuted;
-      setIsSpeakerMuted(nextSpeakerMuted);
     }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = nextSpeakerMuted;
+    }
+    setIsSpeakerMuted(nextSpeakerMuted);
   };
 
   // Toggle Camera
@@ -5121,8 +5116,16 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-[#070c18]/98 backdrop-blur-xl z-50 flex flex-col items-center justify-between p-6 sm:p-10 select-none">
-      {/* Hidden Audio Player for Remote Stream that is never display:none */}
+      {/* Remote Audio Player */}
       <audio ref={remoteAudioRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+
+      {/* Hidden video elements during voice calls so WebRTC audio pipeline is never paused by mobile browsers */}
+      {activeCall.isVideo === false && (
+        <>
+          <video ref={remoteVideoRef} autoPlay playsInline style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+        </>
+      )}
 
       {!isConnected && (
         <audio autoPlay loop src="https://assets.mixkit.co/active_storage/sfx/2805/2805-preview.mp3" />
