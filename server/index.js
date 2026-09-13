@@ -1783,6 +1783,14 @@ io.on("connection", (socket) => {
         }
     });
 
+    // Relay trickle ICE candidates after the initial offer/answer
+    socket.on("relay_signal", (data) => {
+        // data: { to, signal }
+        if (data.to && data.signal) {
+            io.to(data.to).emit("relay_signal", { signal: data.signal, from: socket.id });
+        }
+    });
+
     socket.on("end_call", () => {
         handleEndCall(socket.id, true);
     });

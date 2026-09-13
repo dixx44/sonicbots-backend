@@ -4899,6 +4899,16 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
     };
     socket.on('call_accepted', onCallAccepted);
 
+    // Relay trickle ICE candidates from the remote peer
+    const onRelaySignal = (data: any) => {
+      if (peerRef.current && !destroyed) {
+        try { peerRef.current.signal(data.signal); } catch (e) { console.warn('relay signal error', e); }
+      } else if (!peerRef.current) {
+        pendingSignalsRef.current.push(data.signal);
+      }
+    };
+    socket.on('relay_signal', onRelaySignal);
+
     const getMedia = async () => {
       try {
         return await navigator.mediaDevices.getUserMedia({
@@ -4935,14 +4945,13 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       const peer = new Peer({
         initiator: activeCall.isCaller,
-        trickle: false,
+        trickle: true,
         stream: stream,
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' },
             {
               urls: 'turn:openrelay.metered.ca:80',
               username: 'openrelayproject',
@@ -4952,6 +4961,16 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
               urls: 'turn:openrelay.metered.ca:443',
               username: 'openrelayproject',
               credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turns:openrelay.metered.ca:443',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
             }
           ]
         }
@@ -4959,16 +4978,27 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
 
       peer.on('signal', (data: any) => {
         if (activeCall.isCaller) {
-          socket.emit('call_user', {
-            userToCall: activeCall.userId,
-            targetUsername: activeCall.username,
-            signalData: data,
-            from: myUsername,
-            callerName: myUsername,
-            isVideo: activeCall.isVideo !== false
-          });
+          // First signal is the SDP offer — send via call_user; subsequent are ICE candidates
+          if (data.type === 'offer') {
+            socket.emit('call_user', {
+              userToCall: activeCall.userId,
+              targetUsername: activeCall.username,
+              signalData: data,
+              from: myUsername,
+              callerName: myUsername,
+              isVideo: activeCall.isVideo !== false
+            });
+          } else {
+            // Trickle ICE candidate or renegotiation — relay directly
+            socket.emit('relay_signal', { to: activeCall.userId, signal: data });
+          }
         } else {
-          socket.emit('answer_call', { signal: data, to: activeCall.userId });
+          // Receiver: first signal is the SDP answer, rest are ICE candidates
+          if (data.type === 'answer') {
+            socket.emit('answer_call', { signal: data, to: activeCall.userId });
+          } else {
+            socket.emit('relay_signal', { to: activeCall.userId, signal: data });
+          }
         }
       });
 
@@ -4977,10 +5007,24 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
         setIsConnected(true);
         setCallStatus("Connected. Encrypted Voice & Audio Active");
 
+        // Try the ref element first; fall back to a standalone Audio object if autoplay is blocked
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStream;
           remoteAudioRef.current.volume = 1.0;
-          remoteAudioRef.current.play().catch(e => console.warn("Remote audio play error:", e));
+          remoteAudioRef.current.muted = false;
+          remoteAudioRef.current.play().catch(() => {
+            // Autoplay was blocked — use a detached Audio element instead
+            const fallbackAudio = new Audio();
+            (fallbackAudio as any).srcObject = remoteStream;
+            fallbackAudio.volume = 1.0;
+            fallbackAudio.play().catch(e => console.warn("Audio fallback also failed:", e));
+          });
+        } else {
+          // No ref available — use detached Audio element
+          const fallbackAudio = new Audio();
+          (fallbackAudio as any).srcObject = remoteStream;
+          fallbackAudio.volume = 1.0;
+          fallbackAudio.play().catch(e => console.warn("Audio fallback failed:", e));
         }
 
         if (remoteVideoRef.current) {
@@ -5024,6 +5068,7 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd }: any) {
       destroyed = true;
       socket.off('call_accepted', onCallAccepted);
       socket.off('remote_mute_state', onRemoteMuteState);
+      socket.off('relay_signal', onRelaySignal);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
