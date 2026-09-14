@@ -46,6 +46,9 @@ export const metadata: Metadata = {
   applicationName: "SonicBots",
   verification: {
     google: "gtZ_NpTVcWx1K_BQKGSI_a44LtX3biXZ24kVoqaUous",
+    other: {
+      "msvalidate.01": ["05F18B49651F1F4EE13456D01CD923D4"],
+    },
   },
   alternates: {
     canonical: "https://sonicbots.vercel.app",
