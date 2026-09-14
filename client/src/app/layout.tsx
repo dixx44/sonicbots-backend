@@ -44,6 +44,9 @@ export const metadata: Metadata = {
   creator: "Ashfaq (Founder & Lead Fullstack Architect)",
   publisher: "Ashfaq",
   applicationName: "SonicBots",
+  verification: {
+    google: "gtZ_NpTVcWx1K_BQKGSI_a44LtX3biXZ24kVoqaUous",
+  },
   alternates: {
     canonical: "https://sonicbots.vercel.app",
     languages: {
