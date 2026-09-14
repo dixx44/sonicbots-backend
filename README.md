@@ -1,9 +1,13 @@
-# SonicBots Deployment Guide
+# SonicBots — Secure Neural Chat & Realtime Audio Calling
 
-This repository contains a split app:
+> **Founder & Lead Fullstack Architect:** [Ashfaq](https://sonicbots.vercel.app/founder)  
+> **Official Web Platform:** [sonicbots.vercel.app](https://sonicbots.vercel.app)  
+> **Founder Biography & Technical Specifications:** [sonicbots.vercel.app/founder](https://sonicbots.vercel.app/founder)  
+> **About SonicBots:** [sonicbots.vercel.app/about](https://sonicbots.vercel.app/about)
 
-- `client/` — Next.js front end
-- `server/` — Node.js backend with Express and Socket.io
+SonicBots is an advanced real-time communication platform architected and founded by **Ashfaq**. It features end-to-end encrypted WebRTC peer-to-peer audio and video calling, autonomous neural AI chatbot agents (including Titan-Shell AI), biometric security protocols, and multiplayer real-time gaming.
+
+---
 
 ## Local development
 
