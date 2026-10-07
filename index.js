@@ -389,18 +389,20 @@ const neuralAgents = [
 ];
 
 const broadcastUsers = () => {
+    const humanUsers = Array.from(activeUsers.values()).map(u => {
+        const dbUser = db.users[u.username];
+        const showLS = dbUser ? dbUser.showLastSeen !== false : true;
+        return {
+            ...u,
+            avatar: dbUser?.avatar || u.avatar || u.username,
+            about: dbUser?.about || "Active Neural Agent",
+            showLastSeen: showLS,
+            lastSeen: showLS ? (dbUser?.lastSeen || null) : null
+        };
+    });
+    const uniqueHumans = Array.from(new Map(humanUsers.map(user => [user.username.toLowerCase(), user])).values());
     const allUsers = [
-        ...Array.from(activeUsers.values()).map(u => {
-            const dbUser = db.users[u.username];
-            const showLS = dbUser ? dbUser.showLastSeen !== false : true;
-            return {
-                ...u,
-                avatar: dbUser?.avatar || u.avatar || u.username,
-                about: dbUser?.about || "Active Neural Agent",
-                showLastSeen: showLS,
-                lastSeen: showLS ? (dbUser?.lastSeen || null) : null
-            };
-        }),
+        ...uniqueHumans,
         ...neuralAgents.map(a => ({ ...a, about: a.persona || "AURA Bot Neural Link" }))
     ];
     io.emit("update_users", allUsers);
@@ -463,6 +465,7 @@ io.on("connection", (socket) => {
         };
         saveDb();
 
+        socket.join(cleanUsername);
         const userObj = { id: socket.id, username: cleanUsername, status: "online", joinTime: new Date(), avatar: cleanUsername, about: "Active Neural Agent", showLastSeen: true };
         activeUsers.set(socket.id, userObj);
 
@@ -487,6 +490,7 @@ io.on("connection", (socket) => {
             return socket.emit("auth_error", "Incorrect security credentials.");
         }
 
+        socket.join(userKey);
         const userObj = { 
             id: socket.id, 
             username: userKey, 
@@ -547,6 +551,7 @@ io.on("connection", (socket) => {
 
         console.log("[SERVER] Emitting auth_success for:", targetUsername);
 
+        socket.join(targetUsername);
         const userObj = { 
             id: socket.id, 
             username: targetUsername, 
@@ -677,7 +682,21 @@ io.on("connection", (socket) => {
         saveDb();
 
         if (data.targetId) {
-            io.to(data.targetId).to(socket.id).emit("receive_message", newMsg);
+            // Find target username and all socket IDs connected under target username
+            let targetUname = data.targetUsername || (data.targetId.startsWith("agent_") ? data.targetId : activeUsers.get(data.targetId)?.username);
+            const recipients = new Set([data.targetId, socket.id]);
+            if (targetUname) {
+                recipients.add(targetUname);
+                for (const [sid, u] of activeUsers.entries()) {
+                    if (u.username?.toLowerCase() === targetUname.toLowerCase()) {
+                        recipients.add(sid);
+                    }
+                }
+            }
+            if (user?.username) {
+                recipients.add(user.username);
+            }
+            recipients.forEach(rid => io.to(rid).emit("receive_message", newMsg));
 
             // Notify sender of delivery status
             if (msgStatus === 'delivered') {

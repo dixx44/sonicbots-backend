@@ -15,7 +15,7 @@ root = Path('C:/')
 items = []
 for entry in root.iterdir():
     if entry.is_dir():
-        items.append((entry, get_size(entry)))
+        items.append((entry, get_size(entry))) 
 items.sort(key=lambda x: x[1], reverse=True)
 for entry, size in items[:15]:
     print(entry, round(size/2**30, 2))

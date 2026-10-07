@@ -17,6 +17,7 @@ content = content.replace(
                 db.users[username].history.push({ type: 'cash_in', amount: 15000, reason: 'First Login Bonus', date: new Date().toISOString() });
                 saveDb();
                 gotBonus = true;
+                 
             }`
 );
 

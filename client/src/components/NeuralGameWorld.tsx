@@ -267,6 +267,7 @@ export const playSound = (type: 'roll' | 'move' | 'capture' | 'win') => {
 
 export default function NeuralGameWorld({ username, onBack, initialRoomId, socket, wallet = 0, pendingAgents, negotiationTarget, clearNegotiationTarget }: any) {
     const [gameState, setGameState] = useState<any>(null);
+    const [gameError, setGameError] = useState<string | null>(null);
     const [joinCode, setJoinCode] = useState(initialRoomId || "");
     const [chatMsg, setChatMsg] = useState("");
     const [messages, setMessages] = useState<any[]>([]);
@@ -366,10 +367,9 @@ export default function NeuralGameWorld({ username, onBack, initialRoomId, socke
         });
 
         socket.on('ludo_error', (err: any) => {
-            if (err !== "Already rolled" && err !== "Not your turn") {
-                setEvents((p: any) => [...p, { message: `⚠️ ${err}`, isError: true }]);
-                setTimeout(() => setEvents((p: any) => p.slice(1)), 3000);
-            }
+            setGameError(String(err));
+            setEvents((p: any) => [...p, { message: `⚠️ ${err}`, isError: true }]);
+            setTimeout(() => setEvents((p: any) => p.slice(1)), 3000);
         });
 
         socket.emit('get_wallet');
@@ -886,7 +886,18 @@ export default function NeuralGameWorld({ username, onBack, initialRoomId, socke
 
     if (!gameState || (!gameState.roomId && gameState.state !== 'playing')) {
         return (
-            <div className="w-full h-full bg-[#050810] flex flex-col items-center justify-center relative p-6 overflow-hidden">
+            <div className="w-full h-full min-h-[420px] bg-[#050810] text-white flex flex-col items-center justify-center relative p-6 overflow-hidden">
+                <div className="flex flex-col items-center gap-4 text-center">
+                    <div className="w-10 h-10 rounded-full border-4 border-emerald-500/30 border-t-emerald-400 animate-spin" />
+                    <p className="text-emerald-400 font-mono text-sm uppercase tracking-widest">
+                        {gameError || 'Connecting to the Ludo grid...'}
+                    </p>
+                    {gameError && (
+                        <button onClick={onBack} className="px-4 py-2 rounded-xl bg-emerald-500 text-black font-bold text-xs uppercase">
+                            Back to Lobby
+                        </button>
+                    )}
+                </div>
 
 
                 {showBonusPopup && (

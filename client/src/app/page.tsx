@@ -10,7 +10,15 @@ import dynamic from 'next/dynamic';
 // Dynamic import for face-api and emoji-picker to avoid SSR issues
 const faceapi = typeof window !== "undefined" ? require('@vladmandic/face-api/dist/face-api.esm.js') : null;
 const EmojiPicker = dynamic(() => import('emoji-picker-react'), { ssr: false });
-const NeuralGameWorld = dynamic(() => import('../components/NeuralGameWorld'), { ssr: false });
+const NeuralGameWorld = dynamic(() => import('../components/NeuralGameWorld'), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-full flex flex-col items-center justify-center bg-[#070b14] text-emerald-400 font-mono text-xs gap-3">
+      <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+      <span>INITIALIZING NEURAL GAME MATRIX...</span>
+    </div>
+  )
+});
 const compressImage = (dataUrl: string, maxWidth = 150, maxHeight = 150, quality = 0.7): Promise<string> => {
   return new Promise((resolve) => {
     if (typeof window === 'undefined') {
@@ -115,35 +123,41 @@ export default function App() {
   });
 
   useEffect(() => {
-    // Dynamically connect to the backend socket server.
-    // In production, use NEXT_PUBLIC_SOCKET_URL from environment variables.
-    let socketUrl = socketUrlOverride || process.env.NEXT_PUBLIC_SOCKET_URL || "";
-    
-    // Clean and sanitize the URL (trim whitespace, remove quotes, strip trailing slash)
-    socketUrl = socketUrl.trim().replace(/^['"]|['"]$/g, "");
-    if (socketUrl.endsWith("/")) {
-      socketUrl = socketUrl.slice(0, -1);
-    }
-    
-    // Check if we are running in localhost/local development environment
-    const isLocalhost = typeof window !== "undefined" && (
-      window.location.hostname === "localhost" || 
-      window.location.hostname === "127.0.0.1" || 
-      window.location.hostname.startsWith("192.168.")
+    // =====================================================================
+    // SOCKET URL AUTO-DETECTION
+    // LOCAL/LAN: If accessed from localhost or any LAN IP (172.x, 192.168.x, 10.x),
+    //   connect to local backend at port 5000 on the SAME hostname.
+    //   This means both you and your friend on the same LAN connect to the same server.
+    // PRODUCTION: Only use NEXT_PUBLIC_SOCKET_URL for real cloud/Vercel deployments.
+    // =====================================================================
+    const hostname = typeof window !== "undefined" ? window.location.hostname : "";
+    const isLocalOrLAN = (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname.startsWith("192.168.") ||
+      hostname.startsWith("172.") ||
+      hostname.startsWith("10.")
     );
 
-    // Always use Railway backend - override any localhost or localtunnel URLs
-    if (!socketUrl || socketUrl.includes("localhost") || socketUrl.includes("127.0.0.1") || socketUrl.includes("loca.lt")) {
-      // Force Railway backend - works both locally and in production
-      socketUrl = "https://as-production-14d0.up.railway.app";
-    } else if (socketUrl) {
-      // If it doesn't have http:// or https://, prepend https:// for production reliability
-      if (!socketUrl.startsWith("http://") && !socketUrl.startsWith("https://")) {
-        socketUrl = "https://" + socketUrl;
-      }
+    // Remote Railway/cloud URL from env
+    const remoteUrl = (process.env.NEXT_PUBLIC_SOCKET_URL || "")
+      .trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, "");
+
+    let socketUrl: string;
+    if (socketUrlOverride) {
+      // Manual override always wins (set via settings panel)
+      socketUrl = socketUrlOverride.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, "");
+    } else if (isLocalOrLAN && !remoteUrl) {
+      // Only use local:5000 if NO remote URL is configured
+      // (intentionally running both frontend AND backend locally)
+      socketUrl = `http://${hostname}:5000`;
+    } else {
+      // Use configured Railway/cloud URL - even when developing on localhost
+      socketUrl = remoteUrl || "https://sonicbots-backend-production.up.railway.app";
     }
     setConnectedUrl(socketUrl);
     console.log("[SOCKET] Attempting connection to URL:", socketUrl);
+    let fallbackAttempted = false;
     const newSocket = io(socketUrl, {
       transports: ['polling', 'websocket'],
       extraHeaders: {
@@ -161,6 +175,15 @@ export default function App() {
 
     newSocket.on("connect_error", (error) => {
       console.error("[SOCKET] Connection error to:", socketUrl, error);
+
+      const configuredUrl = process.env.NEXT_PUBLIC_SOCKET_URL?.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, "");
+      const isLocalBackend = /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?$/i.test(socketUrl);
+
+      if (!fallbackAttempted && isLocalBackend && configuredUrl && configuredUrl !== socketUrl) {
+        fallbackAttempted = true;
+        localStorage.removeItem("aura_socket_url");
+        setSocketUrlOverride("");
+      }
     });
 
     newSocket.on("disconnect", (reason) => {
@@ -184,11 +207,11 @@ export default function App() {
         newSocket.on("connect", attemptAuth);
       }
 
-      // Fallback: If auth takes too long, show login
+      // Fallback: If auth takes too long, show login immediately
       const fallback = setTimeout(() => {
         console.warn("[AUTH] Auto-authentication timed out, falling back to manual login.");
         setIsAutoAuthenticating(false);
-      }, 8000); // Increased to 8s for reliability
+      }, 2500); // 2.5s quick fallback
       newSocket.once("auth_success", () => clearTimeout(fallback));
     } else {
       setIsAutoAuthenticating(false);
@@ -202,6 +225,7 @@ export default function App() {
       setIsAuthenticated(true);
       localStorage.setItem("aura_username", data.username);
       setIsAutoAuthenticating(false);
+      newSocket.emit("get_users");
     };
 
     newSocket.on("auth_success", onAuthSuccess);
@@ -230,13 +254,22 @@ export default function App() {
 
   if (isAutoAuthenticating && !isAuthenticated) {
     return (
-      <div className="bg-[#050810] h-screen w-full flex flex-col items-center justify-center">
+      <div className="bg-[#050810] h-screen w-full flex flex-col items-center justify-center gap-4">
         <motion.div
           animate={{ rotate: 360 }}
           transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-          className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full mb-6 shadow-[0_0_20px_rgba(16,185,129,0.3)]"
+          className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full shadow-[0_0_20px_rgba(16,185,129,0.3)]"
         />
         <h2 className="text-emerald-500 font-mono tracking-[0.3em] text-sm animate-pulse">RECONNECTING TO NEURAL GRID...</h2>
+        <button
+          onClick={() => {
+            localStorage.removeItem("aura_username");
+            setIsAutoAuthenticating(false);
+          }}
+          className="px-4 py-2 bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white rounded-xl text-xs font-mono tracking-wider transition-all border border-white/10 mt-2"
+        >
+          SWITCH TO MANUAL LOGIN
+        </button>
       </div>
     );
   }
@@ -258,7 +291,7 @@ export default function App() {
             }}
           />
         ) : (
-          <MainDashboard key="dashboard" socket={socket} username={username} setUsername={setUsername} avatarSeed={avatarSeed} setAvatarSeed={setAvatarSeed} about={about} setAbout={setAbout} showLastSeen={showLastSeen} setShowLastSeen={setShowLastSeen} isGuest={isGuest} setIsGuest={setIsGuest} onLogOut={() => { setIsAuthenticated(false); setIsGuest(false); localStorage.removeItem("aura_username"); }} />
+          <MainDashboard key="dashboard" socket={socket} username={username} setUsername={setUsername} avatarSeed={avatarSeed} setAvatarSeed={setAvatarSeed} about={about} setAbout={setAbout} showLastSeen={showLastSeen} setShowLastSeen={setShowLastSeen} isGuest={isGuest} setIsGuest={setIsGuest} onLogOut={() => { socket?.emit("logout"); socket?.disconnect(); setIsAuthenticated(false); setIsGuest(false); localStorage.removeItem("aura_username"); }} />
         )}
       </AnimatePresence>
     </div>
@@ -335,12 +368,34 @@ function BiometricLogin({
     };
   }, []);
 
+  // iOS Safari requires speechSynthesis to be "unlocked" inside a user-gesture first.
+  // We fire a silent utterance on every button tap to pre-unlock the audio session.
+  const speechUnlockedRef = useRef(false);
+
+  const unlockSpeech = () => {
+    if (speechUnlockedRef.current) return;
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    const unlock = new SpeechSynthesisUtterance('');
+    unlock.volume = 0;
+    window.speechSynthesis.speak(unlock);
+    speechUnlockedRef.current = true;
+  };
+
   const speak = (text: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
     window.speechSynthesis.cancel();
-    const msg = new SpeechSynthesisUtterance(text);
-    msg.rate = 0.9;
-    msg.pitch = 1.1;
-    window.speechSynthesis.speak(msg);
+    const say = () => {
+      const msg = new SpeechSynthesisUtterance(text);
+      msg.rate = 0.9;
+      msg.pitch = 1.1;
+      msg.volume = 1;
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v => v.lang.startsWith('en') && v.localService) || voices[0];
+      if (preferred) msg.voice = preferred;
+      window.speechSynthesis.speak(msg);
+    };
+    // Small timeout lets cancel() flush before new utterance (iOS fix)
+    setTimeout(say, 80);
   };
 
   useEffect(() => {
@@ -349,6 +404,8 @@ function BiometricLogin({
       if (authTimeoutRef.current) clearTimeout(authTimeoutRef.current);
       setIsSubmitting(false);
       setIsRegistering(false);
+      // Voice greeting on login - works on iPhone because unlockSpeech() was called on button tap
+      speak(`Welcome back, ${data.username}. Access granted.`);
       onAuth(data.username, data.avatar, data.about, data.showLastSeen);
     };
     const handleError = (msg: string) => {
@@ -368,6 +425,8 @@ function BiometricLogin({
   }, [socket, onAuth]);
 
   const handleLogin = () => {
+    // Unlock iOS speech synthesis on this user-gesture BEFORE async socket response
+    unlockSpeech();
     if (!credUsername.trim() || !credPassword.trim()) {
       setErrorMessage("Please enter your username and password.");
       return;
@@ -403,6 +462,7 @@ function BiometricLogin({
     setErrorMessage("");
     setIsRegistering(true);
     setIsSubmitting(false);
+    unlockSpeech();
     socket.emit("register_auth", { username: credUsername.trim(), password: credPassword });
     // Safety timeout: reset after 12s if no response
     authTimeoutRef.current = setTimeout(() => {
@@ -582,7 +642,7 @@ function BiometricLogin({
           if (currentStage !== "error") {
             currentStage = "error";
             setScanStage("error");
-            setScanStatus("⚠️ UNAUTHORIZED");
+            setScanStatus("âš ï¸ UNAUTHORIZED");
             setIsWrongMove(true);
           }
         }
@@ -591,7 +651,7 @@ function BiometricLogin({
         if (currentStage === "error") {
           currentStage = "align";
           setScanStage("align");
-          setScanStatus("✅ FACE SECURED: INITIALIZING LINK");
+          setScanStatus("âœ… FACE SECURED: INITIALIZING LINK");
           setIsWrongMove(false);
           speak("Face secured. Linking nodes.");
         }
@@ -727,7 +787,7 @@ function BiometricLogin({
               <div className="flex flex-col gap-4">
                 <div>
                   <h3 className="text-[11px] font-mono uppercase tracking-[0.2em] text-cyan-400 font-bold mb-1">
-                    🌐 GATEWAY CONFIGURATION
+                    ðŸŒ GATEWAY CONFIGURATION
                   </h3>
                   <p className="text-[9px] font-mono text-gray-500 uppercase tracking-wider mb-2 leading-relaxed">
                     Set a custom Socket.io server URL below.
@@ -760,7 +820,7 @@ function BiometricLogin({
                     }}
                     className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 active:scale-95 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all border border-cyan-500/50 shadow-[0_0_20px_rgba(34,211,238,0.2)]"
                   >
-                    💾 APPLY GATEWAY
+                    ðŸ’¾ APPLY GATEWAY
                   </button>
 
                   <button
@@ -771,7 +831,7 @@ function BiometricLogin({
                     }}
                     className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 hover:text-white font-bold text-[9px] uppercase tracking-widest rounded-xl transition-all border border-white/10"
                   >
-                    🔄 RESTORE DEFAULT HOST
+                    ðŸ”„ RESTORE DEFAULT HOST
                   </button>
 
                   <button
@@ -830,7 +890,7 @@ function BiometricLogin({
 
                   <div className="flex justify-between items-center mt-2">
                     <p className="text-[9px] font-mono text-gray-500 uppercase tracking-widest">
-                      {getPasswordStrength(credPassword) === 3 ? "🔒 strong (verified)" : "⚠️ weak key option"}
+                      {getPasswordStrength(credPassword) === 3 ? "ðŸ”’ strong (verified)" : "âš ï¸ weak key option"}
                     </p>
                     {getPasswordStrength(credPassword) === 3 && (
                       <p className="text-[9px] font-mono text-emerald-400 uppercase tracking-wider animate-pulse">
@@ -858,7 +918,7 @@ function BiometricLogin({
                         <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block" />
                         LOGGING IN...
                       </span>
-                    ) : "🔑 LOGIN"}
+                    ) : "ðŸ”‘ LOGIN"}
                   </button>
 
                   {/* REGISTER - requires strong password */}
@@ -872,7 +932,7 @@ function BiometricLogin({
                         <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block" />
                         CREATING ACCOUNT...
                       </span>
-                    ) : "✨ CREATE NEW ACCOUNT"}
+                    ) : "âœ¨ CREATE NEW ACCOUNT"}
                   </button>
 
                   <p className="text-[9px] font-mono text-gray-600 text-center">New user? Fill fields above then click CREATE. Existing user? Click LOGIN.</p>
@@ -883,7 +943,7 @@ function BiometricLogin({
                       onClick={onGuest}
                       className="text-[10px] font-mono text-cyan-400 hover:text-cyan-300 uppercase tracking-widest underline underline-offset-4"
                     >
-                      ⚡ EXPLORE AS GUEST NODE
+                      âš¡ EXPLORE AS GUEST NODE
                     </button>
                   </div>
 
@@ -893,7 +953,7 @@ function BiometricLogin({
                       onClick={() => setShowServerConfig(true)}
                       className="text-[9px] font-mono text-purple-400/80 hover:text-purple-300 uppercase tracking-widest flex items-center justify-center gap-1.5 mx-auto transition-all"
                     >
-                      ⚙️ CONFIGURE GATEWAY
+                      âš™ï¸ CONFIGURE GATEWAY
                     </button>
                   </div>
                 </div>
@@ -1128,7 +1188,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
         status: 'online',
         isVirtual: true,
         avatar: member.avatar,
-        openingMessage: openingQuestion || `Hey! I saw your invite in #community-qa. I need help — can you clarify my doubt?`,
+        openingMessage: openingQuestion || `Hey! I saw your invite in #community-qa. I need help â€” can you clarify my doubt?`,
       }];
     });
     return virtualId;
@@ -1140,6 +1200,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
   const [incomingCall, setIncomingCall] = useState<{ signal: any, from: string, callerName: string, callerAvatar?: string, isVideo?: boolean } | null>(null);
   const [activeCall, setActiveCall] = useState<{ userId: string, username: string, avatarSrc?: string, isCaller: boolean, isAi?: boolean, initialSignal?: any, isVideo?: boolean } | null>(null);
   const pendingRelaySignalsRef = useRef<any[]>([]);
+  const callAudioCtxRef = useRef<any>(null);
   const [incomingLudoInvites, setIncomingLudoInvites] = useState<any[]>([]);
   const [systemStats, setSystemStats] = useState({ totalMessages: 0, aiInterventions: 0, activeCalls: 0 });
   const [toast, setToast] = useState<{ id: string, name: string, text: string } | null>(null);
@@ -1149,6 +1210,16 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
   const [selectedLudoRoom, setSelectedLudoRoom] = useState<string | null>(null);
   const [communityLobbies, setCommunityLobbies] = useState<any[]>([]);
   const [myHostedRoom, setMyHostedRoom] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!socket) return;
+    const handlePageExit = () => {
+      socket.emit("logout");
+      socket.disconnect();
+    };
+    window.addEventListener("pagehide", handlePageExit);
+    return () => window.removeEventListener("pagehide", handlePageExit);
+  }, [socket]);
 
   // Real-Time P2P Money Transfer & Digital Receipt States
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -1231,18 +1302,14 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
   useEffect(() => {
     if (!socket) return;
 
+    // The dashboard can mount just after auth_success; request presence after listeners are ready.
+    socket.emit("get_users");
+
     socket.on('connect', () => {
       if (username) {
         socket.emit("biometric_auth", { forceUsername: username });
       }
     });
-
-    // Poll for users if the list is empty (fallback for initial missed emission)
-    const pollInterval = setInterval(() => {
-      if (onlineUsers.length === 0) {
-        socket.emit("get_users"); // We'll add this handler to the server
-      }
-    }, 2000);
 
     socket.emit("get_wallet");
     socket.on("wallet_update", (data) => {
@@ -1252,7 +1319,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
         setTimeout(() => {
           const audio = new Audio("https://assets.mixkit.co/active_storage/sfx/2013/2013-preview.mp3");
           audio.play().catch(() => { });
-          setToast({ id: 'sys_bonus', name: "AURA BANK", text: `💳 WELCOME BONUS GRANTED: 15,000 LKR` });
+          setToast({ id: 'sys_bonus', name: "AURA BANK", text: `ðŸ’³ WELCOME BONUS GRANTED: 15,000 LKR` });
         }, 1000);
       }
     });
@@ -1321,14 +1388,17 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
 
     socket.on("receive_message", (msg) => {
       const senderUsername = msg.senderUsername || msg.senderName;
-      const isFromOther = msg.senderId && msg.senderId !== socket.id;
-      if (isFromOther && senderUsername) {
-        // Key by senderUsername (stable) not senderId (volatile socket ID)
+      const otherPartyUsername = senderUsername === username ? (msg.targetUsername || msg.targetId) : senderUsername;
+      if (otherPartyUsername) {
+        // Update lastMessageMap for WhatsApp-style top ranking
         setLastMessageMap((p: any) => ({
           ...p,
-          [senderUsername]: Date.now(),
-          [`text_${senderUsername}`]: msg.text
+          [otherPartyUsername]: Date.now(),
+          [`text_${otherPartyUsername}`]: msg.text
         }));
+      }
+      const isFromOther = msg.senderId && msg.senderId !== socket.id;
+      if (isFromOther && senderUsername) {
 
         let decryptedText = msg.text;
         if (msg.isEncrypted) {
@@ -1344,6 +1414,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
         const isCurrentChat = senderUsername === currentTargetUsername || msg.senderId === selectedChatIdRef.current;
 
         if (!isCurrentChat && msg.id && !msg.id.startsWith("sys_")) {
+          setUnreadMap((p: any) => ({ ...p, [msg.senderId]: true, [senderUsername]: true }));
           // If it's a payment slip/transfer message, ONLY show toast notification to sender or recipient!
           if (msg.slipData || (typeof msg.text === 'string' && msg.text.includes('[PAYMENT SLIP]'))) {
             const isParticipant = (msg.senderUsername === username || msg.senderName === username || msg.targetUsername === username || msg.slipData?.to === username || msg.slipData?.from === username);
@@ -1374,12 +1445,6 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
         ring.play().catch(() => {});
       } catch (e) {}
       setIncomingCall(data);
-    });
-
-    socket.on("relay_signal", (data) => {
-      if (data && data.signal) {
-        pendingRelaySignalsRef.current.push(data.signal);
-      }
     });
 
     socket.on("ludo_invite_received", (data) => {
@@ -1469,12 +1534,12 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
         setLastMessageMap((p: any) => ({
           ...p,
           [senderUname]: Date.now(),
-          [`text_${senderUname}`]: `💸 Received ${data.receipt?.amount?.toLocaleString()} LKR from @${senderUname}`
+          [`text_${senderUname}`]: `ðŸ’¸ Received ${data.receipt?.amount?.toLocaleString()} LKR from @${senderUname}`
         }));
       }
       const senderUserObj = onlineUsers.find((u: any) => u.username?.toLowerCase() === senderUname?.toLowerCase());
       const toastTargetId = senderUserObj ? senderUserObj.id : senderUname;
-      setToast({ id: toastTargetId || 'sys_transfer_recv', name: `@${senderUname || "NEURAL BANK"}`, text: `📥 Received ${data.receipt?.amount?.toLocaleString()} LKR from @${senderUname}!` });
+      setToast({ id: toastTargetId || 'sys_transfer_recv', name: `@${senderUname || "NEURAL BANK"}`, text: `ðŸ“¥ Received ${data.receipt?.amount?.toLocaleString()} LKR from @${senderUname}!` });
     });
 
     socket.on("transfer_error", (data: any) => {
@@ -1490,11 +1555,13 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
     socket.emit('get_community_lobbies');
 
     return () => {
-      clearInterval(pollInterval);
       socket.off("update_users");
       socket.off("update_stats");
       socket.off("incoming_call");
-      socket.off("relay_signal");
+      socket.off("receive_message");
+      socket.off("stream_chunk");
+      socket.off("typing_start");
+      socket.off("typing_end");
       socket.off("ludo_invite_received");
       socket.off("call_ended");
       socket.off("receive_call_logs");
@@ -1507,7 +1574,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       socket.off('community_ludo_joined');
       socket.off('community_ludo_ready');
     };
-  }, [socket, onlineUsers.length]);
+  }, [socket]);
 
   // Global Developer Simulator for Discord Community Q&A with Sequential Scenarios
   useEffect(() => {
@@ -1517,32 +1584,32 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
       {
         name: "agent7205_pitch",
         steps: [
-          { type: "join", sender: "agent7205", text: '✨ agent7205 has joined the Discord matrix. "Ready to code!"' },
+          { type: "join", sender: "agent7205", text: 'âœ¨ agent7205 has joined the Discord matrix. "Ready to code!"' },
           { type: "message", sender: "agent7205", avatar: "agent7205", text: "Hey community! I am agent7205. I want to share my ultimate startup project idea: a fully decentralized code workspace using Neural sync!" },
           { type: "message", sender: "Luna_Coder", avatar: "Luna", text: "Wow, that sounds extremely revolutionary agent7205. We could build a stunning glassmorphic UI for it!" },
           { type: "message", sender: "Cyber_Sam", avatar: "Sam", text: "Yes! Using WebSockets peer-to-peer tunnels to synchronize client states would make it latency-free." },
           { type: "message", sender: "agent7205", avatar: "agent7205", text: "Exactly! And we can run backups on the decentralized database nodes every 24 hours automatically." },
-          { type: "leave", sender: "agent7205", text: '💤 agent7205 went offline. "Incubating more ideas..."' }
+          { type: "leave", sender: "agent7205", text: 'ðŸ’¤ agent7205 went offline. "Incubating more ideas..."' }
         ]
       },
       {
         name: "unreal_integration",
         steps: [
-          { type: "join", sender: "Rift_Dev", text: '✨ Rift_Dev has joined the Discord matrix. "Ready to code!"' },
+          { type: "join", sender: "Rift_Dev", text: 'âœ¨ Rift_Dev has joined the Discord matrix. "Ready to code!"' },
           { type: "message", sender: "Rift_Dev", avatar: "Rift", text: "Does anyone have a sample configuration for connecting Unreal Engine C++ WebSockets to Aura's dashboard?" },
           { type: "message", sender: "DevBot", avatar: "DevBot", text: "Yes Rift_Dev! Under #unreal-engine-realtime, you can find the C++ class header setup using FWebSocketsModule." },
           { type: "message", sender: "Rift_Dev", avatar: "Rift", text: "Ah, found it! Compiling the module now. Thank you, DevBot!" },
-          { type: "leave", sender: "Rift_Dev", text: '💤 Rift_Dev went offline. "Heading to the grid..."' }
+          { type: "leave", sender: "Rift_Dev", text: 'ðŸ’¤ Rift_Dev went offline. "Heading to the grid..."' }
         ]
       },
       {
         name: "ludo_betting",
         steps: [
-          { type: "join", sender: "Neon_Gamer", text: '✨ Neon_Gamer has joined the Discord matrix. "Ready to code!"' },
+          { type: "join", sender: "Neon_Gamer", text: 'âœ¨ Neon_Gamer has joined the Discord matrix. "Ready to code!"' },
           { type: "message", sender: "Neon_Gamer", avatar: "Neon", text: "Hey! Who is up for a Neural Ludo game? Minimum bet is 500 LKR. Ready to deploy pieces to grid!" },
           { type: "message", sender: "Pixel_Art", avatar: "Pixel", text: "I am down! Just topped up my wallet. Let's start a 1v1 match." },
           { type: "message", sender: "Neon_Gamer", avatar: "Neon", text: "Sending invite now! Join via the notification link." },
-          { type: "leave", sender: "Neon_Gamer", text: '💤 Neon_Gamer went offline. "In-game..."' }
+          { type: "leave", sender: "Neon_Gamer", text: 'ðŸ’¤ Neon_Gamer went offline. "In-game..."' }
         ]
       }
     ];
@@ -1604,14 +1671,19 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
-        const ctx = new AudioCtx();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0.001; // virtually silent
+        if (!callAudioCtxRef.current || callAudioCtxRef.current.state === 'closed') {
+          callAudioCtxRef.current = new AudioCtx();
+        }
+        if (callAudioCtxRef.current.state === 'suspended') {
+          callAudioCtxRef.current.resume().catch(() => {});
+        }
+        const osc = callAudioCtxRef.current.createOscillator();
+        const gain = callAudioCtxRef.current.createGain();
+        gain.gain.value = 0.0001; // virtually silent
         osc.connect(gain);
-        gain.connect(ctx.destination);
+        gain.connect(callAudioCtxRef.current.destination);
         osc.start(0);
-        osc.stop(ctx.currentTime + 0.05);
+        osc.stop(callAudioCtxRef.current.currentTime + 0.05);
       }
     } catch (e) {}
   };
@@ -1897,6 +1969,8 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
                     time={user.status.toUpperCase()}
                     status={user.status}
                     hasUnread={unreadMap[user.id] || unreadMap[user.username]}
+                    onCallVoice={user.status === "online" ? () => startCall(user, false) : undefined}
+                    onCallVideo={user.status === "online" ? () => startCall(user, true) : undefined}
                   />
                 );
               })}
@@ -1993,7 +2067,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
           setSelectedChatId(virtualId);
         }} onLudoInvite={(memberInfo: any) => {
           const roomId = `AURA-${Date.now().toString().slice(-5)}`;
-          const virtualId = addVirtualDmUser({ ...memberInfo, openingMessage: `Let's play Ludo! I joined room ${roomId} 🎮` }, `Let's play Ludo! I joined room ${roomId} 🎮`);
+          const virtualId = addVirtualDmUser({ ...memberInfo, openingMessage: `Let's play Ludo! I joined room ${roomId} ðŸŽ®` }, `Let's play Ludo! I joined room ${roomId} ðŸŽ®`);
           setPendingLudoInvite(true);
           setActiveTab('chat');
           setSelectedChatId(virtualId);
@@ -2222,6 +2296,7 @@ function MainDashboard({ socket, username, setUsername, avatarSeed, setAvatarSee
                 myUsername={username}
                 onEnd={() => setActiveCall(null)}
                 pendingRelaySignalsRef={pendingRelaySignalsRef}
+                sharedAudioCtxRef={callAudioCtxRef}
               />
             )
           )}
@@ -2259,13 +2334,13 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
   const [discoverSearch, setDiscoverSearch] = useState('');
 
   const CATEGORIES = [
-    { label: 'All', icon: '🌐', color: 'from-cyan-500 to-blue-600' },
-    { label: 'Online', icon: '🟢', color: 'from-emerald-500 to-green-600' },
-    { label: 'Developers', icon: '💻', color: 'from-violet-500 to-purple-600' },
-    { label: 'Gamers', icon: '🎮', color: 'from-orange-500 to-red-500' },
-    { label: 'Designers', icon: '🎨', color: 'from-pink-500 to-rose-500' },
-    { label: 'AI Agents', icon: '🤖', color: 'from-sky-500 to-cyan-600' },
-    { label: 'VIP', icon: '👑', color: 'from-yellow-400 to-amber-500' },
+    { label: 'All', icon: 'ðŸŒ', color: 'from-cyan-500 to-blue-600' },
+    { label: 'Online', icon: 'ðŸŸ¢', color: 'from-emerald-500 to-green-600' },
+    { label: 'Developers', icon: 'ðŸ’»', color: 'from-violet-500 to-purple-600' },
+    { label: 'Gamers', icon: 'ðŸŽ®', color: 'from-orange-500 to-red-500' },
+    { label: 'Designers', icon: 'ðŸŽ¨', color: 'from-pink-500 to-rose-500' },
+    { label: 'AI Agents', icon: 'ðŸ¤–', color: 'from-sky-500 to-cyan-600' },
+    { label: 'VIP', icon: 'ðŸ‘‘', color: 'from-yellow-400 to-amber-500' },
   ];
 
   const ROLES: Record<string, string> = {
@@ -2308,7 +2383,7 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
   return (
     <div className="w-full h-full overflow-y-auto flex flex-col bg-[#050810]">
 
-      {/* ── Hero Header ── */}
+      {/* â”€â”€ Hero Header â”€â”€ */}
       <div className="relative shrink-0 h-52 md:h-64 overflow-hidden">
         {/* Background gradient mesh */}
         <div className="absolute inset-0 bg-gradient-to-br from-[#0d1b3e] via-[#050810] to-[#0a0f1e]" />
@@ -2348,12 +2423,12 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
               onChange={e => setDiscoverSearch(e.target.value)}
               className="w-full bg-white/5 backdrop-blur-md border border-white/10 focus:border-cyan-500/50 text-white placeholder-gray-500 rounded-2xl px-5 py-2.5 text-sm font-mono outline-none transition-all pr-10"
             />
-            <span className="absolute right-4 top-3 text-gray-500 text-sm">⌕</span>
+            <span className="absolute right-4 top-3 text-gray-500 text-sm">âŒ•</span>
           </div>
         </div>
       </div>
 
-      {/* ── Category Slider ── */}
+      {/* â”€â”€ Category Slider â”€â”€ */}
       <div className="shrink-0 px-4 py-4 overflow-x-auto scrollbar-none">
         <div className="flex items-center gap-2 w-max mx-auto">
           {CATEGORIES.map(cat => (
@@ -2380,12 +2455,12 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
         </div>
       </div>
 
-      {/* ── Stats Strip ── */}
+      {/* â”€â”€ Stats Strip â”€â”€ */}
       <div className="shrink-0 mx-6 mb-5 grid grid-cols-3 gap-3">
         {[
-          { label: 'Online Now', value: onlineUsers.filter(u => u.status === 'online').length, icon: '🟢', color: 'text-emerald-400' },
-          { label: 'Total Agents', value: onlineUsers.length, icon: '👥', color: 'text-cyan-400' },
-          { label: 'VIP Members', value: onlineUsers.filter(u => u.username === 'Ashfaq').length || 1, icon: '👑', color: 'text-yellow-400' },
+          { label: 'Online Now', value: onlineUsers.filter(u => u.status === 'online').length, icon: 'ðŸŸ¢', color: 'text-emerald-400' },
+          { label: 'Total Agents', value: onlineUsers.length, icon: 'ðŸ‘¥', color: 'text-cyan-400' },
+          { label: 'VIP Members', value: onlineUsers.filter(u => u.username === 'Ashfaq').length || 1, icon: 'ðŸ‘‘', color: 'text-yellow-400' },
         ].map(stat => (
           <div key={stat.label} className="bg-white/3 border border-white/5 rounded-2xl px-4 py-3 text-center">
             <div className="text-xl mb-1">{stat.icon}</div>
@@ -2395,11 +2470,11 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
         ))}
       </div>
 
-      {/* ── User Grid ── */}
+      {/* â”€â”€ User Grid â”€â”€ */}
       <div className="flex-1 px-6 pb-8">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
-            <span className="text-5xl mb-4">🔍</span>
+            <span className="text-5xl mb-4">ðŸ”</span>
             <p className="text-gray-400 font-mono text-sm">No agents found in this category</p>
             <button onClick={() => { setActiveCategory('All'); setDiscoverSearch(''); }} className="mt-4 text-xs text-cyan-400 hover:underline font-mono">Clear filters</button>
           </div>
@@ -2451,7 +2526,7 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
                       onClick={() => onChat(user.id)}
                       className="flex-1 py-2 bg-gradient-to-r from-cyan-500/10 to-violet-500/10 hover:from-cyan-500 hover:to-violet-600 text-cyan-400 hover:text-white border border-cyan-500/20 hover:border-transparent rounded-xl text-[11px] font-black font-mono transition-all tracking-widest uppercase"
                     >
-                      💬 Message
+                      ðŸ’¬ Message
                     </button>
                     <button
                       onClick={() => onCall(user, true)}
@@ -2478,25 +2553,50 @@ function OnlineUsersDirectory({ onlineUsers, onCall, onChat }: { onlineUsers: an
   );
 }
 
-function ChatListItem({ name, lastMsg, time, active, onClick, isGlobal, status, hasUnread, avatar }: any) {
+function ChatListItem({ name, lastMsg, time, active, onClick, isGlobal, status, hasUnread, avatar, onCallVoice, onCallVideo }: any) {
   const avatarUrl = String(avatar || "").startsWith("data:image") ? avatar : `https://api.dicebear.com/7.x/bottts/svg?seed=${avatar || name}`;
   return (
-    <button onClick={onClick} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${active ? 'bg-emerald-500/10 border border-emerald-500/20' : 'hover:bg-white/5 border border-transparent'} ${status === 'offline' ? 'opacity-50' : ''} ${hasUnread ? 'bg-white/5' : ''}`}>
-      <div className="relative shrink-0">
-        <div className={`w-12 h-12 rounded-full border border-white/10 p-[2px] ${isGlobal ? 'bg-emerald-500/20' : 'bg-[#050810]'}`}>
-          <img src={avatarUrl} className="w-full h-full rounded-full" />
+    <div className={`w-full flex items-center gap-2 sm:gap-3 p-2.5 sm:p-3 rounded-xl transition-all ${active ? 'bg-emerald-500/10 border border-emerald-500/20' : 'hover:bg-white/5 border border-transparent'} ${status === 'offline' ? 'opacity-50' : ''} ${hasUnread ? 'bg-white/5' : ''}`}>
+      <button type="button" onClick={onClick} className="flex-1 flex items-center gap-2.5 sm:gap-3 text-left overflow-hidden min-w-0 bg-transparent border-none p-0 cursor-pointer">
+        <div className="relative shrink-0">
+          <div className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full border border-white/10 p-[2px] ${isGlobal ? 'bg-emerald-500/20' : 'bg-[#050810]'}`}>
+            <img src={avatarUrl} className="w-full h-full rounded-full object-cover" />
+          </div>
+          {!isGlobal && <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0b121f] ${status === 'online' ? 'bg-emerald-500' : 'bg-gray-600'}`}></div>}
+          {hasUnread && !active && <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#050810] animate-pulse"></div>}
         </div>
-        {!isGlobal && <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#0b121f] ${status === 'online' ? 'bg-emerald-500' : 'bg-gray-600'}`}></div>}
-        {hasUnread && !active && <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#050810] animate-pulse"></div>}
-      </div>
-      <div className="flex-1 text-left overflow-hidden">
-        <div className="flex justify-between items-center mb-1">
-          <span className={`text-sm font-bold truncate ${active ? 'text-emerald-400' : 'text-white'} ${hasUnread ? 'text-emerald-400 font-black' : ''}`}>{name}</span>
-          <span className={`text-[9px] font-mono ${status === 'online' ? 'text-emerald-500' : 'text-gray-500'}`}>{time}</span>
+        <div className="flex-1 text-left overflow-hidden min-w-0">
+          <div className="flex justify-between items-center mb-0.5">
+            <span className={`text-xs sm:text-sm font-bold truncate ${active ? 'text-emerald-400' : 'text-white'} ${hasUnread ? 'text-emerald-400 font-black' : ''}`}>{name}</span>
+            <span className={`text-[9px] font-mono shrink-0 ml-1 ${status === 'online' ? 'text-emerald-500' : 'text-gray-500'}`}>{time}</span>
+          </div>
+          <p className={`text-[10px] sm:text-[11px] truncate ${hasUnread ? 'text-emerald-500 font-bold' : 'text-gray-500'}`}>{hasUnread ? "NEW MESSAGE" : lastMsg}</p>
         </div>
-        <p className={`text-[11px] truncate ${hasUnread ? 'text-emerald-500 font-bold' : 'text-gray-500'}`}>{hasUnread ? "NEW MESSAGE" : lastMsg}</p>
-      </div>
-    </button>
+      </button>
+
+      {!isGlobal && onCallVoice && (
+        <div className="flex items-center gap-1 shrink-0 ml-1">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onCallVoice(); }}
+            className="w-8 h-8 rounded-full bg-emerald-500/15 hover:bg-emerald-500 text-emerald-400 hover:text-black border border-emerald-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-90"
+            title={`Audio call ${name}`}
+          >
+            <Phone className="w-3.5 h-3.5" />
+          </button>
+          {onCallVideo && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onCallVideo(); }}
+              className="w-8 h-8 rounded-full bg-cyan-500/15 hover:bg-cyan-500 text-cyan-400 hover:text-black border border-cyan-500/30 flex items-center justify-center transition-all cursor-pointer shadow-sm active:scale-90"
+              title={`Video call ${name}`}
+            >
+              <Video className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2553,7 +2653,7 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
     if (setShowLastSeen) setShowLastSeen(newShowLastSeen);
     localStorage.setItem("aura_username", newUsername);
     socket.emit("update_profile", { username: newUsername, avatar: newSeed, about: newAbout, showLastSeen: newShowLastSeen });
-    setStatus("✓ Profile Synchronized to Neural Grid.");
+    setStatus("âœ“ Profile Synchronized to Neural Grid.");
     setTimeout(() => setStatus(""), 3000);
   }
 
@@ -2572,7 +2672,7 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
           </div>
         </div>
 
-        {/* DP Section — WhatsApp style large centered avatar */}
+        {/* DP Section â€” WhatsApp style large centered avatar */}
         <div className="flex flex-col items-center mb-8">
           <div
             className="relative w-32 h-32 rounded-full cursor-pointer group"
@@ -2585,7 +2685,7 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
             />
             {/* Hover overlay */}
             <div className="absolute inset-0 bg-black/60 rounded-full flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-200">
-              <span className="text-white text-xs font-bold uppercase tracking-wide">📷</span>
+              <span className="text-white text-xs font-bold uppercase tracking-wide">ðŸ“·</span>
               <span className="text-white text-[10px] mt-1">Change</span>
             </div>
           </div>
@@ -2618,7 +2718,7 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
               onClick={() => setActiveSection(tab)}
               className={`flex-1 py-2 rounded-lg text-xs font-bold font-mono uppercase tracking-widest transition-all ${activeSection === tab ? 'bg-emerald-500 text-[#050810]' : 'text-gray-400 hover:text-white'}`}
             >
-              {tab === 'identity' ? '👤 Identity' : tab === 'privacy' ? '🔒 Privacy' : '📊 Stats'}
+              {tab === 'identity' ? 'ðŸ‘¤ Identity' : tab === 'privacy' ? 'ðŸ”’ Privacy' : 'ðŸ“Š Stats'}
             </button>
           ))}
         </div>
@@ -2653,7 +2753,7 @@ function ProfilePage({ username, setUsername, avatarSeed, setAvatarSeed, about, 
             <div>
               <p className="text-[10px] text-gray-600 font-mono uppercase tracking-widest mb-2">Quick Status</p>
               <div className="flex flex-wrap gap-2">
-                {["Available ✅", "Busy 🔴", "At school 📚", "At work 💼", "Gaming 🎮", "Sleeping 😴"].map(s => (
+                {["Available âœ…", "Busy ðŸ”´", "At school ðŸ“š", "At work ðŸ’¼", "Gaming ðŸŽ®", "Sleeping ðŸ˜´"].map(s => (
                   <button
                     key={s}
                     onClick={() => setNewAbout(s)}
@@ -2892,7 +2992,7 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
     // Initial greeting
     const greetingText = `Neural connection secured with ${activeCall.username}. I am online and listening. What would you like to discuss?`;
     const t1 = setTimeout(() => {
-      setStatus("Neural Line Active · Speaking");
+      setStatus("Neural Line Active Â· Speaking");
       setIsSpeakingUI(true);
       isSpeakingRef.current = true;
       setAiResponseText(greetingText);
@@ -2977,7 +3077,7 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
       <div className="w-full max-w-lg flex flex-col items-center gap-2 pt-2">
         <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[11px] uppercase tracking-wider">
           <Cpu className="w-3.5 h-3.5 animate-pulse" />
-          <span>NEURAL AI VOICE CHANNEL · {formatTime(callDuration)}</span>
+          <span>NEURAL AI VOICE CHANNEL Â· {formatTime(callDuration)}</span>
         </div>
         <p className="text-gray-400 font-mono text-xs">{status}</p>
       </div>
@@ -3025,7 +3125,7 @@ function AiVoiceCallInterface({ activeCall, onEnd, socket }: any) {
 
         {/* Quick Voice Prompt Chips */}
         <div className="flex flex-wrap items-center justify-center gap-2 mt-4 max-w-sm">
-          {["Hello! How are you?", "Let's play Ludo 🎲", "Who built you?", "Tell me a joke 🤖"].map((chip) => (
+          {["Hello! How are you?", "Let's play Ludo ðŸŽ²", "Who built you?", "Tell me a joke ðŸ¤–"].map((chip) => (
             <button
               key={chip}
               onClick={() => sendTalkMessage(chip)}
@@ -3147,7 +3247,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
           id: `ack_${Date.now()}`,
           sender: targetName,
           senderName: targetName,
-          text: `✅ Payment of ${payModalAmount} LKR received and confirmed! Slip saved. Thank you so much 🙏`,
+          text: `âœ… Payment of ${payModalAmount} LKR received and confirmed! Slip saved. Thank you so much ðŸ™`,
           timestamp: new Date(),
           isEncrypted: false,
         };
@@ -3155,7 +3255,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
       }, 2000);
     } else {
       socket?.emit('send_message', {
-        text: `💸 [PAYMENT SLIP] ${payModalAmount} LKR → ${targetName} | TxID: ${txId} | ${payModalNote || 'Payment for consultation'}`,
+        text: `ðŸ’¸ [PAYMENT SLIP] ${payModalAmount} LKR â†’ ${targetName} | TxID: ${txId} | ${payModalNote || 'Payment for consultation'}`,
         targetId,
         isEncrypted: false,
       });
@@ -3174,6 +3274,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wallpaperFileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const previousTargetRef = useRef<string | null | 'LIST'>(null);
   const messageRefs = useRef<Map<string, HTMLElement>>(new Map());
   const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -3492,13 +3593,15 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
 
       // Handle Unread and Sorting logic - use senderUsername (stable) as key
       const senderUname = msg.senderUsername || msg.senderName;
-      if (msg.senderId && msg.senderId !== socket.id && senderUname) {
-        // Key by username for stability across reconnects
+      const conversationParty = senderUname === username ? (msg.targetUsername || targetName) : senderUname;
+      if (conversationParty) {
         setLastMessageMap((p: any) => ({
           ...p,
-          [senderUname]: Date.now(),
-          [`text_${senderUname}`]: decryptedText
+          [conversationParty]: Date.now(),
+          [`text_${conversationParty}`]: decryptedText
         }));
+      }
+      if (msg.senderId && msg.senderId !== socket.id && senderUname) {
         // Determine if this sender is the currently open chat
         const targetUserObj = onlineUsers.find((u: any) => u.id === targetId);
         const targetUname = targetUserObj?.username || targetId;
@@ -3570,7 +3673,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
     };
   }, [socket, targetId, username]);
 
-  // ── Dedicated always-live effect for reactions + deletes (fixes real-time reaction sync) ──
+  // â”€â”€ Dedicated always-live effect for reactions + deletes (fixes real-time reaction sync) â”€â”€
   useEffect(() => {
     if (!socket) return;
 
@@ -3617,16 +3720,23 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
     }
   }, [socket, targetId]);
 
-  // Scroll to bottom ONLY when opening or switching to a chat conversation
+  // Follow new messages when the reader is already near the bottom.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [targetId]);
+    const marker = messagesEndRef.current;
+    if (!marker) return;
+    const scroller = marker.parentElement;
+    const targetChanged = previousTargetRef.current !== targetId;
+    previousTargetRef.current = targetId;
+    if (targetChanged || !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 180) {
+      marker.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [targetId, messages]);
 
   // Auto-start Ludo lobby when invited from community
   useEffect(() => {
     if (!autoStartLudoLobby) return;
     const roomId = `AURA-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-    const slots = [username, '⏳ Waiting...', '⏳ Waiting...', '⏳ Waiting...'];
+    const slots = [username, 'â³ Waiting...', 'â³ Waiting...', 'â³ Waiting...'];
     setLudoLobby({ roomId, players: [...slots], ready: 1 });
     const fakeNames = ['NeuralNinja', 'Pixel_Surge', 'CodeDrake'];
     fakeNames.forEach((name, i) => {
@@ -3691,10 +3801,10 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
         setTimeout(() => {
           setVirtualTyping(false);
           const confirmReplies = [
-            `That's exactly what I needed! You cleared my doubt completely 🙌 Thank you so much! Let me send you payment now.`,
-            `Wow, that actually makes perfect sense now! I was stuck on this for hours 😂 You really know your stuff. Ready to pay!`,
-            `Brilliant explanation! I fully understand now ✅ You deserve the payment. Sending now!`,
-            `That solved it! Amazing help, genuinely satisfied 🔥 Processing your payment.`,
+            `That's exactly what I needed! You cleared my doubt completely ðŸ™Œ Thank you so much! Let me send you payment now.`,
+            `Wow, that actually makes perfect sense now! I was stuck on this for hours ðŸ˜‚ You really know your stuff. Ready to pay!`,
+            `Brilliant explanation! I fully understand now âœ… You deserve the payment. Sending now!`,
+            `That solved it! Amazing help, genuinely satisfied ðŸ”¥ Processing your payment.`,
           ];
           const confirm = confirmReplies[Math.floor(Math.random() * confirmReplies.length)];
           const confirmMsg = {
@@ -3723,6 +3833,14 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
       payload.replyToSender = replyingTo.senderName || replyingTo.sender;
       payload.replyToText = replyingTo.text;
       payload.replyToIsImage = !!replyingTo.isImage || (typeof replyingTo.text === 'string' && (replyingTo.text.startsWith('data:image') || (replyingTo.text.startsWith('http') && !replyingTo.isVideo)));
+    }
+    // WhatsApp-style: Immediately bring this chat to the top for the sender
+    if (targetName) {
+      setLastMessageMap((p: any) => ({
+        ...p,
+        [targetName]: Date.now(),
+        [`text_${targetName}`]: input
+      }));
     }
     socket.emit("send_message", payload);
     setInput("");
@@ -3759,40 +3877,40 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
   return (
     <div className="flex flex-col h-full w-full min-h-0">
       {/* WhatsApp/Discord Style Header */}
-      <header className="h-20 flex items-center justify-between px-6 border-b border-white/5 bg-[#090d16] shrink-0 z-20">
-        <div className="flex items-center gap-4 cursor-pointer hover:opacity-90 select-none group" onClick={() => setShowProfileDrawer(!showProfileDrawer)}>
+      <header className="h-16 sm:h-20 flex items-center justify-between px-2.5 sm:px-4 md:px-6 border-b border-white/5 bg-[#090d16] shrink-0 z-20 gap-2">
+        <div className="flex items-center gap-2 sm:gap-3.5 cursor-pointer hover:opacity-90 select-none group min-w-0 flex-1 overflow-hidden" onClick={() => setShowProfileDrawer(!showProfileDrawer)}>
           {onBack && (
-            <button onClick={(e) => { e.stopPropagation(); onBack(); }} className="md:hidden p-2 -ml-2 rounded-full hover:bg-white/5 text-gray-400 hover:text-white transition-all">
-              <ChevronLeft className="w-6 h-6" />
+            <button onClick={(e) => { e.stopPropagation(); onBack(); }} className="md:hidden p-1.5 -ml-1 rounded-full hover:bg-white/5 text-gray-400 hover:text-white transition-all shrink-0">
+              <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
           )}
-          <div className="relative">
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center border ${THEMES[chatTheme].border} overflow-hidden ${!targetId ? 'bg-emerald-500/20' : 'bg-[#050810]'} group-hover:scale-105 transition-transform duration-300`}>
+          <div className="relative shrink-0">
+            <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center border ${THEMES[chatTheme].border} overflow-hidden ${!targetId ? 'bg-emerald-500/20' : 'bg-[#050810]'} group-hover:scale-105 transition-transform duration-300`}>
               {(() => {
                 // Use avatarCache (keyed by username) for reliable lookup even when user reconnects
                 const activeAvatarSrc = getAvatarSrcLocal(targetName, onlineUsers.find((u: any) => u.id === targetId || u.username === targetName)?.avatar);
-                return <img src={activeAvatarSrc} className="w-10 h-10 object-cover rounded-full" />;
+                return <img src={activeAvatarSrc} className="w-full h-full object-cover rounded-full" />;
               })()}
             </div>
-            {!targetId && <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[#090d16] animate-pulse ${chatTheme === 'emerald' ? 'bg-emerald-500' : chatTheme === 'purple' ? 'bg-purple-500' : chatTheme === 'cyan' ? 'bg-cyan-500' : chatTheme === 'amber' ? 'bg-amber-500' : 'bg-rose-500'}`}></div>}
+            {!targetId && <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full border-2 border-[#090d16] animate-pulse ${chatTheme === 'emerald' ? 'bg-emerald-500' : chatTheme === 'purple' ? 'bg-purple-500' : chatTheme === 'cyan' ? 'bg-cyan-500' : chatTheme === 'amber' ? 'bg-amber-500' : 'bg-rose-500'}`}></div>}
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-white flex items-center gap-2 group-hover:text-emerald-400 transition-colors">
-              {currentDisplayName}
-              <Info className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-all text-gray-500" />
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <h1 className="text-sm sm:text-base md:text-lg font-bold text-white flex items-center gap-1.5 group-hover:text-emerald-400 transition-colors truncate">
+              <span className="truncate">{currentDisplayName}</span>
+              <Info className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-all text-gray-500 shrink-0" />
             </h1>
-            <p className={`text-[10px] font-mono flex items-center gap-1 uppercase tracking-tighter ${THEMES[chatTheme].text}`}>
+            <p className={`text-[9px] sm:text-[10px] font-mono flex items-center gap-1 uppercase tracking-tighter truncate ${THEMES[chatTheme].text}`}>
               {typingStatus ? (
-                <span className="animate-pulse">{typingStatus}</span>
+                <span className="animate-pulse truncate">{typingStatus}</span>
               ) : (() => {
                 if (!targetId) {
-                  return <><ShieldCheck className="w-3 h-3" />{`${onlineCount} AGENTS ONLINE`}</>;
+                  return <><ShieldCheck className="w-3 h-3 shrink-0" /><span className="truncate">{`${onlineCount} AGENTS ONLINE`}</span></>;
                 }
                 const targetUser = onlineUsers.find((u: any) => u.id === targetId);
                 if (targetUser && targetUser.status !== 'offline') {
-                  return <><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse" />Online</>
+                  return <><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse shrink-0" /><span className="truncate">Online</span></>;
                 }
-                // Offline — show last seen
+                // Offline â€” show last seen
                 const ls = targetUser?.lastSeen || (onlineUsers as any[]).find?.((u: any) => u.id === targetId)?.lastSeen;
                 if (ls) {
                   const lsDate = new Date(ls);
@@ -3804,16 +3922,44 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                   else if (diffMins < 60) lsText = `Last seen ${diffMins}m ago`;
                   else if (diffMins < 1440) lsText = `Last seen ${Math.floor(diffMins / 60)}h ago`;
                   else lsText = `Last seen ${lsDate.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
-                  return <><span className="w-2 h-2 rounded-full bg-gray-500 inline-block" /><span className="text-gray-500 normal-case">{lsText}</span></>;
+                  return <><span className="w-2 h-2 rounded-full bg-gray-500 inline-block shrink-0" /><span className="text-gray-500 normal-case truncate">{lsText}</span></>;
                 }
-                return <><ShieldCheck className="w-3 h-3" />Secure Peer Tunnel • Contact Info</>;
+                return <><ShieldCheck className="w-3 h-3 shrink-0" /><span className="truncate">Secure Peer Tunnel</span></>;
               })()}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 md:gap-3 relative">
-          {/* WhatsApp Style Calendar Date Jump */}
-          <div className="relative">
+
+        {/* Action Buttons: Phone & Video are ALWAYS prominent and visible on mobile and desktop */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 relative">
+          {/* Voice Audio Call Button - Glowing Emerald */}
+          <button
+            type="button"
+            onClick={() => {
+              const u = onlineUsers.find((x: any) => x.id === targetId || x.username === targetName) || { id: targetId, username: targetName };
+              onCall(u, false);
+            }}
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500 hover:text-black border border-emerald-500/40 flex items-center justify-center transition-all shadow-[0_0_12px_rgba(16,185,129,0.25)] active:scale-95 shrink-0 cursor-pointer"
+            title="Voice Audio Call"
+          >
+            <Phone className="w-4 h-4 sm:w-5 sm:h-5" />
+          </button>
+
+          {/* Video Call Button - Glowing Cyan */}
+          <button
+            type="button"
+            onClick={() => {
+              const u = onlineUsers.find((x: any) => x.id === targetId || x.username === targetName) || { id: targetId, username: targetName };
+              onCall(u, true);
+            }}
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500 hover:text-black border border-cyan-500/40 flex items-center justify-center transition-all shadow-[0_0_12px_rgba(6,182,212,0.25)] active:scale-95 shrink-0 cursor-pointer"
+            title="Video Call"
+          >
+            <Video className="w-4 h-4 sm:w-5 sm:h-5" />
+          </button>
+
+          {/* Desktop-only Date Picker */}
+          <div className="relative hidden md:block">
             <button
               type="button"
               onClick={() => setShowDatePicker(p => !p)}
@@ -3878,7 +4024,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                     }}
                     className="px-2 py-2 bg-white/5 hover:bg-emerald-500/20 text-gray-300 hover:text-emerald-300 rounded-xl text-[10px] font-mono text-center transition-all font-bold"
                   >
-                    📅 Today
+                    ðŸ“… Today
                   </button>
                   <button
                     type="button"
@@ -3890,17 +4036,18 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                     }}
                     className="px-2 py-2 bg-white/5 hover:bg-cyan-500/20 text-gray-300 hover:text-cyan-300 rounded-xl text-[10px] font-mono text-center transition-all font-bold"
                   >
-                    ⏳ Oldest Message
+                    â³ Oldest Message
                   </button>
                 </div>
               </div>
             )}
           </div>
 
-          <button onClick={() => { if (targetId) socket.emit("invite_game", { targetId, targetName }); }} className={`w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 ${THEMES[chatTheme].hoverText} transition-all`} title="Invite to Neural Ludo"><Gamepad2 className="w-5 h-5" /></button>
-          <button onClick={() => { const u = onlineUsers.find((x: any) => x.id === targetId || x.username === targetName) || { id: targetId, username: targetName }; onCall(u, true); }} className="w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 hover:text-cyan-400 transition-all" title="Video Call"><Video className="w-5 h-5" /></button>
-          <button onClick={() => { const u = onlineUsers.find((x: any) => x.id === targetId || x.username === targetName) || { id: targetId, username: targetName }; onCall(u, false); }} className={`w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 ${THEMES[chatTheme].hoverText} transition-all`} title="Voice Call"><Phone className="w-5 h-5" /></button>
-          <button onClick={() => setShowChatSettings(!showChatSettings)} className={`w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 ${showChatSettings ? THEMES[chatTheme].text : ''} transition-all`}><MoreVertical className="w-5 h-5" /></button>
+          {/* Desktop-only Invite to Ludo */}
+          <button onClick={() => { if (targetId) socket.emit("invite_game", { targetId, targetName }); }} className={`hidden md:flex w-10 h-10 rounded-full hover:bg-white/5 items-center justify-center text-gray-400 ${THEMES[chatTheme].hoverText} transition-all`} title="Invite to Neural Ludo"><Gamepad2 className="w-5 h-5" /></button>
+
+          {/* More Settings */}
+          <button onClick={() => setShowChatSettings(!showChatSettings)} className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-gray-400 ${showChatSettings ? THEMES[chatTheme].text : ''} transition-all shrink-0`}><MoreVertical className="w-4 h-4 sm:w-5 sm:h-5" /></button>
           {showChatSettings && (
             <div className="absolute right-0 top-12 w-56 bg-[#0c1222]/95 border border-white/10 rounded-2xl py-2 shadow-[0_10px_30px_rgba(0,0,0,0.5)] backdrop-blur-md z-50 animate-in fade-in slide-in-from-top-3 duration-200">
               <button
@@ -3911,6 +4058,15 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                 className="w-full text-left px-4 py-2.5 text-xs font-mono uppercase tracking-wider text-gray-300 hover:bg-white/5 hover:text-emerald-400 flex items-center gap-2 transition-all"
               >
                 <ShieldCheck className="w-4 h-4" /> Active Chat
+              </button>
+              <button
+                onClick={() => {
+                  if (targetId) socket.emit("invite_game", { targetId, targetName });
+                  setShowChatSettings(false);
+                }}
+                className="w-full text-left px-4 py-2.5 text-xs font-mono uppercase tracking-wider text-gray-300 hover:bg-white/5 hover:text-amber-400 flex items-center gap-2 transition-all"
+              >
+                <Gamepad2 className="w-4 h-4 text-amber-400" /> Invite to Neural Ludo
               </button>
               <button
                 onClick={() => {
@@ -4035,7 +4191,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                                 </div>
                                 <div className="overflow-hidden">
                                   <p className="text-white font-mono text-[11px] font-bold truncate">NEURAL_TRANSIT_RECEIPT.pdf</p>
-                                  <p className="text-emerald-400 font-mono text-[9px] uppercase tracking-wider">PDF DOCUMENT • VERIFIED</p>
+                                  <p className="text-emerald-400 font-mono text-[9px] uppercase tracking-wider">PDF DOCUMENT â€¢ VERIFIED</p>
                                 </div>
                               </div>
                               <span className="text-[9px] bg-emerald-500/20 text-emerald-300 font-mono px-2 py-0.5 rounded-md border border-emerald-500/40 uppercase font-bold shrink-0">PDF</span>
@@ -4045,7 +4201,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                             <div className="bg-[#04070f] border border-white/5 rounded-xl p-3 space-y-2 font-mono text-[10px]">
                               <div className="flex justify-between items-center border-b border-white/5 pb-1.5">
                                 <span className="text-gray-500 uppercase">Route</span>
-                                <span className="text-white font-bold">@{msg.slipData?.from || msg.senderUsername || msg.senderName} ➔ @{msg.slipData?.to || msg.targetUsername}</span>
+                                <span className="text-white font-bold">@{msg.slipData?.from || msg.senderUsername || msg.senderName} âž” @{msg.slipData?.to || msg.targetUsername}</span>
                               </div>
                               <div className="flex justify-between items-center border-b border-white/5 pb-1.5">
                                 <span className="text-gray-500 uppercase">TxID</span>
@@ -4082,7 +4238,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                                 }}
                                 className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-black font-black text-[10px] uppercase tracking-widest rounded-xl flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all cursor-pointer"
                               >
-                                <Receipt className="w-4 h-4" /> 📄 VIEW / DOWNLOAD PDF RECEIPT
+                                <Receipt className="w-4 h-4" /> ðŸ“„ VIEW / DOWNLOAD PDF RECEIPT
                               </button>
                             </div>
 
@@ -4114,7 +4270,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                               </span>
                             )}
 
-                            {/* Action Menu Trigger (Arrow) — always visible on mobile, hover on desktop */}
+                            {/* Action Menu Trigger (Arrow) â€” always visible on mobile, hover on desktop */}
                             <div className="absolute top-2 right-1.5 opacity-80 md:opacity-0 md:group-hover/msg:opacity-100 transition-opacity z-20">
                               <button
                                 type="button"
@@ -4242,7 +4398,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                                   <path d="M11.04 4.75l-1.06-1.06L5.5 8.17l1.06 1.06L11.04 4.75z" />
                                 </svg>
                               ) : (
-                                /* Single grey tick — sent to server */
+                                /* Single grey tick â€” sent to server */
                                 <svg viewBox="0 0 12 11" className="w-3 h-3 fill-white/50" xmlns="http://www.w3.org/2000/svg">
                                   <path d="M11.07.88a.5.5 0 0 0-.707 0L4.5 6.742 1.637 3.879a.5.5 0 1 0-.707.708L4.147 7.8a.5.5 0 0 0 .707 0L11.07 1.588a.5.5 0 0 0 0-.708z" />
                                 </svg>
@@ -4276,13 +4432,13 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                   </div>
                 </div>
               )}
-              {/* Virtual DM Payment Banner — only shows AFTER satisfaction confirmed */}
+              {/* Virtual DM Payment Banner â€” only shows AFTER satisfaction confirmed */}
               {isVirtualDm && dmPhase === 'confirmed' && !paymentDone && (
                 <div key="payment-banner" className="mx-4 my-3 bg-gradient-to-r from-emerald-500/10 to-cyan-500/10 border border-emerald-500/20 rounded-2xl p-4 animate-fade-in">
                   <div className="flex items-center gap-2 mb-3">
-                    <span className="text-xl">💰</span>
+                    <span className="text-xl">ðŸ’°</span>
                     <div>
-                      <p className="text-white font-bold text-sm font-mono">{targetName} is satisfied ✅</p>
+                      <p className="text-white font-bold text-sm font-mono">{targetName} is satisfied âœ…</p>
                       <p className="text-gray-400 text-[11px] font-mono">Select the payment amount to collect.</p>
                     </div>
                   </div>
@@ -4300,7 +4456,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                         }}
                         className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500 text-emerald-400 hover:text-black border border-emerald-500/30 rounded-xl text-xs font-black font-mono transition-all"
                       >
-                        💰 {amt} LKR
+                        ðŸ’° {amt} LKR
                       </button>
                     ))}
                   </div>
@@ -4319,25 +4475,25 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
               )}
               {paymentSuccess && (
                 <div key="payment-success" className="mx-4 my-2 flex items-center gap-3 bg-emerald-500/15 border border-emerald-500/40 rounded-2xl px-4 py-3 animate-fade-in">
-                  <span className="text-2xl">🎉</span>
+                  <span className="text-2xl">ðŸŽ‰</span>
                   <div>
                     <p className="text-emerald-400 font-black font-mono text-sm">+{paymentSuccess} LKR Collected!</p>
-                    <p className="text-gray-400 text-[11px] font-mono">Payment stored in your wallet ✓</p>
+                    <p className="text-gray-400 text-[11px] font-mono">Payment stored in your wallet âœ“</p>
                   </div>
                 </div>
               )}
               {isVirtualDm && paymentDone && !paymentSuccess && (
-                <div key="payment-done" className="mx-4 my-2 text-center text-xs text-emerald-500 font-mono opacity-60">✓ Payment collected — session complete</div>
+                <div key="payment-done" className="mx-4 my-2 text-center text-xs text-emerald-500 font-mono opacity-60">âœ“ Payment collected â€” session complete</div>
               )}
               {/* Ludo Lobby Card */}
               {ludoLobby && (
                 <div key="ludo-lobby" className="mx-4 my-3 bg-gradient-to-b from-[#0c1a2e] to-[#050810] border border-emerald-500/20 rounded-2xl p-5 shadow-[0_0_30px_rgba(16,185,129,0.08)]">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
-                      <span className="text-2xl">🎮</span>
+                      <span className="text-2xl">ðŸŽ®</span>
                       <div>
                         <p className="text-white font-black font-mono text-sm">Neural Ludo Lobby</p>
-                        <p className="text-emerald-500 text-[10px] font-mono">Room: {ludoLobby.roomId} · {ludoLobby.ready}/4 ready</p>
+                        <p className="text-emerald-500 text-[10px] font-mono">Room: {ludoLobby.roomId} Â· {ludoLobby.ready}/4 ready</p>
                       </div>
                     </div>
                     <div className="flex gap-1">
@@ -4348,10 +4504,10 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                   </div>
                   <div className="space-y-2 mb-4">
                     {ludoLobby.players.map((player, i) => (
-                      <div key={i} className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-500 ${player.startsWith('⏳') ? 'bg-white/3 opacity-40' : 'bg-emerald-500/10 border border-emerald-500/20'}`}>
-                        <div className={`w-2 h-2 rounded-full ${player.startsWith('⏳') ? 'bg-gray-600' : 'bg-emerald-400 animate-pulse'}`} />
+                      <div key={i} className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-500 ${player.startsWith('â³') ? 'bg-white/3 opacity-40' : 'bg-emerald-500/10 border border-emerald-500/20'}`}>
+                        <div className={`w-2 h-2 rounded-full ${player.startsWith('â³') ? 'bg-gray-600' : 'bg-emerald-400 animate-pulse'}`} />
                         <span className="text-xs font-mono font-bold text-white">{i === 0 ? `${player} (You)` : player}</span>
-                        {!player.startsWith('⏳') && i !== 0 && <span className="ml-auto text-[9px] text-emerald-500 font-mono">✓ READY</span>}
+                        {!player.startsWith('â³') && i !== 0 && <span className="ml-auto text-[9px] text-emerald-500 font-mono">âœ“ READY</span>}
                       </div>
                     ))}
                   </div>
@@ -4364,11 +4520,11 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                       disabled={ludoLaunching}
                       className="w-full py-3 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-black font-black rounded-xl text-sm font-mono uppercase tracking-widest transition-all shadow-[0_0_25px_rgba(16,185,129,0.4)] animate-pulse disabled:animate-none disabled:opacity-70"
                     >
-                      {ludoLaunching ? '⚡ Syncing Neural Grid...' : '🚀 DEPLOY TO GRID'}
+                      {ludoLaunching ? 'âš¡ Syncing Neural Grid...' : 'ðŸš€ DEPLOY TO GRID'}
                     </button>
                   ) : (
                     <div className="text-center text-[10px] text-gray-500 font-mono animate-pulse">
-                      ⏳ Waiting for {4 - ludoLobby.ready} more player{4 - ludoLobby.ready > 1 ? 's' : ''}...
+                      â³ Waiting for {4 - ludoLobby.ready} more player{4 - ludoLobby.ready > 1 ? 's' : ''}...
                     </div>
                   )}
                 </div>
@@ -4392,13 +4548,13 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
               <div className="absolute bottom-[85px] left-2 right-2 sm:left-4 sm:right-4 z-50 bg-[#0c1222] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-[0_0_30px_rgba(245,158,11,0.15)] backdrop-blur-sm animate-fade-in">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2">
-                    <span className="text-xl">💸</span>
+                    <span className="text-xl">ðŸ’¸</span>
                     <div>
                       <p className="text-white font-black font-mono text-sm">Send Payment</p>
-                      <p className="text-gray-500 text-[10px] font-mono">Real-time LKR transfer → {targetName}</p>
+                      <p className="text-gray-500 text-[10px] font-mono">Real-time LKR transfer â†’ {targetName}</p>
                     </div>
                   </div>
-                  <button onClick={() => setShowPayModal(false)} className="text-gray-500 hover:text-white text-sm transition-all">✕</button>
+                  <button onClick={() => setShowPayModal(false)} className="text-gray-500 hover:text-white text-sm transition-all">âœ•</button>
                 </div>
                 <p className="text-[10px] text-gray-500 font-mono uppercase tracking-widest mb-2">Amount (LKR)</p>
                 <div className="flex gap-2 flex-wrap mb-3">
@@ -4406,9 +4562,9 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                     <button key={a} onClick={() => setPayModalAmount(a)} className={`px-3 py-1.5 rounded-xl text-xs font-black font-mono transition-all ${payModalAmount === a ? 'bg-amber-500 text-black shadow-[0_0_10px_rgba(245,158,11,0.4)]' : 'bg-white/5 text-gray-400 hover:bg-white/10'}`}>{a}</button>
                   ))}
                 </div>
-                <input value={payModalNote} onChange={e => setPayModalNote(e.target.value)} placeholder="Note: e.g. Thanks for the consultation! 🙏" className="w-full bg-white/5 border border-white/10 text-white rounded-xl px-3 py-2 text-xs font-mono outline-none mb-3 focus:border-amber-500/50 transition-all" />
+                <input value={payModalNote} onChange={e => setPayModalNote(e.target.value)} placeholder="Note: e.g. Thanks for the consultation! ðŸ™" className="w-full bg-white/5 border border-white/10 text-white rounded-xl px-3 py-2 text-xs font-mono outline-none mb-3 focus:border-amber-500/50 transition-all" />
                 <button onClick={sendPaymentSlip} className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-black rounded-xl text-xs font-mono uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(245,158,11,0.3)]">
-                  💸 Transfer {payModalAmount} LKR · Share Slip
+                  ðŸ’¸ Transfer {payModalAmount} LKR Â· Share Slip
                 </button>
               </div>
             )}
@@ -4433,7 +4589,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
                         Replying to {replyingTo.senderName === username ? "You" : replyingTo.senderName || replyingTo.sender}
                       </p>
                       <p className="truncate text-gray-400 text-xs font-mono">
-                        {(replyingTo.isImage || (typeof replyingTo.text === 'string' && (replyingTo.text.startsWith('data:image') || (replyingTo.text.startsWith('http') && !replyingTo.isVideo)))) ? "📷 Photo" : replyingTo.text}
+                        {(replyingTo.isImage || (typeof replyingTo.text === 'string' && (replyingTo.text.startsWith('data:image') || (replyingTo.text.startsWith('http') && !replyingTo.isVideo)))) ? "ðŸ“· Photo" : replyingTo.text}
                       </p>
                     </div>
                   </div>
@@ -4787,7 +4943,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
             {/* Quick React Emoji Bar */}
             <div className="text-[10px] font-mono text-gray-400 uppercase px-2 pt-1 pb-1 font-bold">Quick React</div>
             <div className="flex items-center justify-around pb-2 border-b border-white/10 px-1 mb-1">
-              {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
+              {['ðŸ‘', 'â¤ï¸', 'ðŸ˜‚', 'ðŸ˜®', 'ðŸ˜¢', 'ðŸ™'].map(emoji => (
                 <button
                   key={emoji}
                   type="button"
@@ -4872,7 +5028,7 @@ function MultiplayerChat({ socket, username, onlineCount, targetId, targetName, 
   );
 }
 
-function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRelaySignalsRef }: any) {
+function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRelaySignalsRef, sharedAudioCtxRef }: any) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
@@ -4884,8 +5040,9 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isRemoteMuted, setIsRemoteMuted] = useState(false);
   const [micBlocked, setMicBlocked] = useState(false);
-  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
   const audioCtxRef = useRef<any>(null);
+  const remoteSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const remoteGainRef = useRef<GainNode | null>(null);
 
   // Retry acquiring microphone if user unlocks permissions in browser
   const requestMicAgain = async () => {
@@ -5086,63 +5243,63 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
         }
       });
 
-      peer.on('stream', (remoteStream: MediaStream) => {
+      const attachRemoteStream = (remoteStream: MediaStream) => {
         if (destroyed) return;
+        const audioTracks = remoteStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          setCallStatus("Connected, waiting for remote microphone...");
+          return;
+        }
+
         setIsConnected(true);
-        setCallStatus("Connected · Voice Active");
+        setCallStatus("Connected Â· Voice Active");
 
         // Enable all remote audio tracks
-        remoteStream.getAudioTracks().forEach(track => { track.enabled = true; });
+        audioTracks.forEach(track => { track.enabled = true; });
 
-        // 1. Play through HTML5 Audio element
+        // Bind directly to <audio> tag for 100% reliable hardware speaker playback
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.volume = 1.0;
           remoteAudioRef.current.muted = false;
-          const playPromise = remoteAudioRef.current.play();
-          if (playPromise !== undefined) {
-            playPromise.catch((e) => {
-              console.warn("Audio autoplay blocked by browser policy:", e);
-              setNeedsAudioUnlock(true);
-            });
-          }
+          remoteAudioRef.current.play().catch(e => {
+            console.warn("[WebRTC] Audio auto-play prevented by browser policy:", e);
+          });
         }
 
-        // 2. Play through HTML5 Video element (iOS Safari playsinline fallback)
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.volume = 1.0;
-          remoteVideoRef.current.muted = false;
-          const playPromise = remoteVideoRef.current.play();
-          if (playPromise !== undefined) {
-            playPromise.catch(() => {
-              setNeedsAudioUnlock(true);
-            });
-          }
+          remoteVideoRef.current.play().catch(() => {});
         }
 
-        // 3. Web Audio API hardware audio sink (routes directly to mobile loudspeaker)
+        // Web Audio fallback/enhancement if supported
         try {
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-          if (AudioContextClass) {
-            if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-              audioCtxRef.current = new AudioContextClass();
-            }
-            if (audioCtxRef.current.state === 'suspended') {
-              audioCtxRef.current.resume();
-            }
-            const srcNode = audioCtxRef.current.createMediaStreamSource(remoteStream);
-            srcNode.connect(audioCtxRef.current.destination);
+          const audioContext = sharedAudioCtxRef?.current || audioCtxRef.current;
+          if (audioContext) {
+            audioCtxRef.current = audioContext;
+            if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+            if (remoteSourceRef.current) remoteSourceRef.current.disconnect();
+            if (remoteGainRef.current) remoteGainRef.current.disconnect();
+            const source = audioContext.createMediaStreamSource(remoteStream);
+            const gain = audioContext.createGain();
+            gain.gain.value = isSpeakerMuted ? 0 : 1;
+            source.connect(gain);
+            gain.connect(audioContext.destination);
+            remoteSourceRef.current = source;
+            remoteGainRef.current = gain;
           }
-        } catch (err) {
-          console.warn("[WebRTC] WebAudio sink error:", err);
+        } catch (error) {
+          console.warn('[WebRTC] WebAudio routing fallback note:', error);
         }
+      };
+
+      peer.on('stream', attachRemoteStream);
+      peer.on('track', (track: MediaStreamTrack, stream: MediaStream) => {
+        if (track.kind === 'audio') attachRemoteStream(stream);
       });
 
       peer.on('connect', () => {
         if (!destroyed) {
-          setIsConnected(true);
-          setCallStatus("Connected · Voice Active");
+          setCallStatus("Secure link connected Â· Waiting for audio...");
         }
       });
 
@@ -5188,6 +5345,22 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
       socket.off('call_accepted', onCallAccepted);
       socket.off('remote_mute_state', onRemoteMuteState);
       socket.off('relay_signal', onRelaySignal);
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.pause();
+        remoteAudioRef.current.srcObject = null;
+      }
+      if (remoteSourceRef.current) {
+        remoteSourceRef.current.disconnect();
+        remoteSourceRef.current = null;
+      }
+      if (remoteGainRef.current) {
+        remoteGainRef.current.disconnect();
+        remoteGainRef.current = null;
+      }
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.pause();
+        remoteVideoRef.current.srcObject = null;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
@@ -5218,16 +5391,10 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
 
   // Toggle Speaker
   const toggleSpeaker = () => {
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
     const nextSpeakerMuted = !isSpeakerMuted;
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.muted = nextSpeakerMuted;
-    }
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = nextSpeakerMuted;
-    }
+    const audioContext = sharedAudioCtxRef?.current || audioCtxRef.current;
+    if (audioContext?.state === 'suspended') audioContext.resume().catch(() => {});
+    if (remoteGainRef.current) remoteGainRef.current.gain.value = nextSpeakerMuted ? 0 : 1;
     setIsSpeakerMuted(nextSpeakerMuted);
   };
 
@@ -5256,7 +5423,7 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
       {/* Hidden local video element during voice calls so WebRTC audio pipeline is never paused by mobile browsers */}
       {activeCall.isVideo === false && (
         <>
-          {/* Hidden video — iOS Safari plays WebRTC audio through <video playsInline> more reliably */}
+          {/* Hidden video â€” iOS Safari plays WebRTC audio through <video playsInline> more reliably */}
           <video ref={remoteVideoRef} autoPlay playsInline style={{ position: 'fixed', bottom: 0, left: 0, width: '1px', height: '1px', opacity: 0.01, pointerEvents: 'none' }} />
           <video ref={localVideoRef} autoPlay playsInline muted style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
         </>
@@ -5270,7 +5437,7 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
       <div className="w-full max-w-lg flex flex-col items-center gap-2 pt-4">
         <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-emerald-400 font-mono text-[11px] uppercase tracking-wider">
           <Lock className="w-3.5 h-3.5" />
-          <span>{isConnected ? `ENCRYPTED CALL · ${formatTime(callDuration)}` : "CONNECTING SECURE TUNNEL"}</span>
+          <span>{isConnected ? `ENCRYPTED CALL Â· ${formatTime(callDuration)}` : "CONNECTING SECURE TUNNEL"}</span>
         </div>
         <p className="text-gray-400 font-mono text-xs">{callStatus}</p>
 
@@ -5306,26 +5473,6 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
             <span className="text-emerald-400 font-mono text-xs uppercase tracking-widest">{isConnected ? "Voice Stream Active" : "Ringing..."}</span>
           </div>
 
-          {/* Pulsating Tap to Hear Audio Button if browser autoplay blocked it */}
-          {needsAudioUnlock && (
-            <motion.button
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                remoteAudioRef.current?.play().catch(() => {});
-                remoteVideoRef.current?.play().catch(() => {});
-                if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-                  audioCtxRef.current.resume();
-                }
-                setNeedsAudioUnlock(false);
-              }}
-              className="mt-4 px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-black font-black text-xs font-mono rounded-full shadow-[0_0_25px_rgba(16,185,129,0.7)] animate-bounce uppercase tracking-wider flex items-center gap-2 cursor-pointer z-50"
-            >
-              <Volume2 className="w-4 h-4" />
-              <span>🔊 Tap to Hear Friend's Voice</span>
-            </motion.button>
-          )}
         </div>
       ) : (
         <div className="relative w-full max-w-3xl aspect-video bg-[#040711] rounded-3xl overflow-hidden border border-white/10 shadow-2xl my-auto flex items-center justify-center">
@@ -5363,7 +5510,7 @@ function VideoCallInterface({ socket, activeCall, myUsername, onEnd, pendingRela
             onClick={requestMicAgain}
             className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-mono font-bold text-xs rounded-xl shadow-lg transition-all uppercase tracking-wider"
           >
-            🎙️ Enable Microphone
+            ðŸŽ™ï¸ Enable Microphone
           </button>
         </motion.div>
       )}
@@ -5518,7 +5665,7 @@ function WalletPage({ walletInfo, username, onOpenTransfer, onSelectReceipt }: {
                         <p className={`font-black text-2xl ${isCashIn ? 'text-emerald-400' : 'text-red-400'}`}>
                           {isCashIn ? '+' : '-'}{(h.amount || 0).toLocaleString()} LKR
                         </p>
-                        <p className="text-gray-500 text-[10px] font-mono group-hover:text-emerald-400 transition-colors uppercase">Click for Receipt 🧾</p>
+                        <p className="text-gray-500 text-[10px] font-mono group-hover:text-emerald-400 transition-colors uppercase">Click for Receipt ðŸ§¾</p>
                       </div>
                       <ChevronRight className="w-5 h-5 text-gray-600 group-hover:text-white transition-colors" />
                     </div>
@@ -5579,7 +5726,7 @@ function TransferModal({
     const handleResult = (res: any) => {
       if (res.valid) {
         setVerificationState('valid');
-        setVerificationMsg(res.message || `✔ VERIFIED ONLINE ACCOUNT (@${res.username})`);
+        setVerificationMsg(res.message || `âœ” VERIFIED ONLINE ACCOUNT (@${res.username})`);
         setShakeError(false);
         try {
           const audio = new Audio("https://assets.mixkit.co/active_storage/sfx/2013/2013-preview.mp3");
@@ -5588,7 +5735,7 @@ function TransferModal({
         } catch (e) {}
       } else {
         setVerificationState('invalid');
-        setVerificationMsg(res.message || `✖ ACCOUNT NOT FOUND`);
+        setVerificationMsg(res.message || `âœ– ACCOUNT NOT FOUND`);
         setShakeError(true);
         setTimeout(() => setShakeError(false), 450);
         try {
@@ -5887,12 +6034,12 @@ function ShopPage({ socket, walletInfo }: { socket: Socket | null, walletInfo: a
   const [giftSent, setGiftSent] = useState(false);
 
   const tokens = [
-    { id: 'standard', name: 'Standard Unit', price: 0, icon: '⬢', desc: 'Default neural node geometry.' },
-    { id: 'button', name: 'Tactical Button', price: 1500, icon: '🔘', desc: 'Low-profile sleek kinetic disc.' },
-    { id: 'sphere', name: 'Neon Sphere', price: 1000, icon: '●', desc: 'High-speed aerodynamic kinetic unit.' },
-    { id: 'cube', name: 'Cyber Cube', price: 2500, icon: '■', desc: 'Reinforced block chain geometry.' },
-    { id: 'diamond', name: 'Apex Diamond', price: 3500, icon: '💎', desc: 'Multi-faceted crystalline sync unit.' },
-    { id: 'pyramid', name: 'Neural Pyramid', price: 5000, icon: '▲', desc: 'Elite geometric sync structure.' },
+    { id: 'standard', name: 'Standard Unit', price: 0, icon: 'â¬¢', desc: 'Default neural node geometry.' },
+    { id: 'button', name: 'Tactical Button', price: 1500, icon: 'ðŸ”˜', desc: 'Low-profile sleek kinetic disc.' },
+    { id: 'sphere', name: 'Neon Sphere', price: 1000, icon: 'â—', desc: 'High-speed aerodynamic kinetic unit.' },
+    { id: 'cube', name: 'Cyber Cube', price: 2500, icon: 'â– ', desc: 'Reinforced block chain geometry.' },
+    { id: 'diamond', name: 'Apex Diamond', price: 3500, icon: 'ðŸ’Ž', desc: 'Multi-faceted crystalline sync unit.' },
+    { id: 'pyramid', name: 'Neural Pyramid', price: 5000, icon: 'â–²', desc: 'Elite geometric sync structure.' },
   ];
 
   const boards = [
@@ -5928,14 +6075,14 @@ function ShopPage({ socket, walletInfo }: { socket: Socket | null, walletInfo: a
       <div className="flex gap-4 mb-8 flex-wrap">
         <button onClick={() => setActiveShopTab('tokens')} className={`px-8 py-3 rounded-xl font-bold transition-all ${activeShopTab === 'tokens' ? 'bg-emerald-500 text-black shadow-[0_0_20px_rgba(16,185,129,0.3)]' : 'bg-white/5 text-gray-500 hover:text-white'}`}>TOKEN SKINS</button>
         <button onClick={() => setActiveShopTab('boards')} className={`px-8 py-3 rounded-xl font-bold transition-all ${activeShopTab === 'boards' ? 'bg-emerald-500 text-black shadow-[0_0_20px_rgba(16,185,129,0.3)]' : 'bg-white/5 text-gray-500 hover:text-white'}`}>BOARD STYLES</button>
-        <button onClick={() => setActiveShopTab('gift')} className={`px-8 py-3 rounded-xl font-bold transition-all ${activeShopTab === 'gift' ? 'bg-violet-500 text-white shadow-[0_0_20px_rgba(139,92,246,0.3)]' : 'bg-white/5 text-gray-500 hover:text-white'}`}>🎁 GIFT TOKENS</button>
+        <button onClick={() => setActiveShopTab('gift')} className={`px-8 py-3 rounded-xl font-bold transition-all ${activeShopTab === 'gift' ? 'bg-violet-500 text-white shadow-[0_0_20px_rgba(139,92,246,0.3)]' : 'bg-white/5 text-gray-500 hover:text-white'}`}>ðŸŽ GIFT TOKENS</button>
       </div>
 
       {activeShopTab === 'gift' ? (
         <div className="max-w-xl">
           <div className="bg-[#0c1222] border border-white/5 rounded-3xl p-8">
             <div className="flex items-center gap-3 mb-6">
-              <span className="text-4xl">🎁</span>
+              <span className="text-4xl">ðŸŽ</span>
               <div>
                 <h2 className="text-xl font-black text-white font-mono">Send a Gift</h2>
                 <p className="text-gray-500 text-xs font-mono">Transfer LKR or token skin to another agent</p>
@@ -5943,7 +6090,7 @@ function ShopPage({ socket, walletInfo }: { socket: Socket | null, walletInfo: a
             </div>
             {giftSent ? (
               <div className="text-center py-8">
-                <div className="text-5xl mb-4">🎉</div>
+                <div className="text-5xl mb-4">ðŸŽ‰</div>
                 <p className="text-emerald-400 font-black text-lg font-mono">Gift Sent!</p>
                 <p className="text-gray-500 text-sm font-mono mt-1">{giftAmount} LKR sent to {giftRecipient || 'recipient'}</p>
                 <button onClick={() => { setGiftSent(false); setGiftRecipient(''); setGiftMsg(''); }} className="mt-6 px-6 py-2 bg-white/5 text-gray-400 rounded-xl text-sm font-mono hover:bg-white/10 transition-all">Send Another</button>
@@ -5964,7 +6111,7 @@ function ShopPage({ socket, walletInfo }: { socket: Socket | null, walletInfo: a
                 </div>
                 <div>
                   <label className="text-[10px] text-gray-500 font-mono uppercase tracking-widest mb-2 block">Message (optional)</label>
-                  <input value={giftMsg} onChange={e => setGiftMsg(e.target.value)} placeholder="Thanks for the help! 🙏" className="w-full bg-white/5 border border-white/10 focus:border-violet-500/50 text-white rounded-xl px-4 py-3 text-sm font-mono outline-none transition-all" />
+                  <input value={giftMsg} onChange={e => setGiftMsg(e.target.value)} placeholder="Thanks for the help! ðŸ™" className="w-full bg-white/5 border border-white/10 focus:border-violet-500/50 text-white rounded-xl px-4 py-3 text-sm font-mono outline-none transition-all" />
                 </div>
                 <button
                   onClick={() => {
@@ -5974,7 +6121,7 @@ function ShopPage({ socket, walletInfo }: { socket: Socket | null, walletInfo: a
                   }}
                   className="w-full py-3 bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-400 hover:to-purple-500 text-white font-black rounded-xl transition-all shadow-[0_0_20px_rgba(139,92,246,0.3)] font-mono uppercase tracking-wider"
                 >
-                  🎁 Send {giftAmount} LKR Gift
+                  ðŸŽ Send {giftAmount} LKR Gift
                 </button>
               </div>
             )}
@@ -6069,54 +6216,54 @@ function DiscordDevHub({ socket, username, nicknames, qaMessages, setQaMessages,
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [qaMessages, isTyping]);
 
-  // Always-on community activity — members join/chat/leave automatically
+  // Always-on community activity â€” members join/chat/leave automatically
   useEffect(() => {
     const ACTIVITY_POOL = [
       {
         member: { name: "Rift_Dev", avatar: "Rift", isBot: false }, messages: [
           "Anyone else getting WebSocket timeouts on port 5000?",
           "Just pushed a new C++ socket class to the grid. Feels smooth!",
-          "Working on Unreal Engine multiplayer sync right now 🔥",
+          "Working on Unreal Engine multiplayer sync right now ðŸ”¥",
         ]
       },
       {
         member: { name: "Luna_Coder", avatar: "Luna", isBot: false }, messages: [
-          "Loving the new glassmorphic updates on the dashboard 🌙",
+          "Loving the new glassmorphic updates on the dashboard ðŸŒ™",
           "Hot tip: always use `useEffect` cleanup to avoid socket leaks!",
           "Does anyone have a good Next.js 14 app router example?",
         ]
       },
       {
         member: { name: "Cyber_Sam", avatar: "Sam", isBot: false }, messages: [
-          "Socket handshake complete ✅ All tunnels stable.",
+          "Socket handshake complete âœ… All tunnels stable.",
           "Pro tip: use heartbeat pings every 25s to keep WS alive.",
           "Just debugged a nasty race condition in the message queue. Fixed!",
         ]
       },
       {
         member: { name: "Neon_Gamer", avatar: "Neon", isBot: false }, messages: [
-          "Who's up for a Ludo match? 500 LKR minimum! 🎮",
-          "Just won 3 games in a row. The neural Ludo AI is no match 😄",
-          "Waiting in the lobby — anyone joining?",
+          "Who's up for a Ludo match? 500 LKR minimum! ðŸŽ®",
+          "Just won 3 games in a row. The neural Ludo AI is no match ðŸ˜„",
+          "Waiting in the lobby â€” anyone joining?",
         ]
       },
       {
         member: { name: "Pixel_Art", avatar: "Pixel", isBot: false }, messages: [
-          "New UI mockup looks fire 🎨 Dark mode + neon accents = perfect.",
+          "New UI mockup looks fire ðŸŽ¨ Dark mode + neon accents = perfect.",
           "Anyone else obsessed with the glow effects on the cards?",
           "Design tip: keep your HSL hue consistent across the palette!",
         ]
       },
       {
         member: { name: "agent7205", avatar: "agent7205", isBot: true }, messages: [
-          "Neural activity spike detected. All systems green 🤖",
+          "Neural activity spike detected. All systems green ðŸ¤–",
           "Analyzing decentralized node topology... standby.",
           "Fascinating thread! I'm logging this for the next build cycle.",
         ]
       },
       {
         member: { name: "Ashfaq", avatar: "Ashfaq", isBot: false }, messages: [
-          "Great progress everyone. Keep pushing to the grid! 🚀",
+          "Great progress everyone. Keep pushing to the grid! ðŸš€",
           "Reminder: biometric auth update drops next cycle. Stay tuned.",
           "All systems operational. Welcome to the Aura ecosystem.",
         ]
@@ -6134,7 +6281,7 @@ function DiscordDevHub({ socket, username, nicknames, qaMessages, setQaMessages,
         sender: "System",
         avatar: "System",
         isSystem: true,
-        text: `✨ ${member.name} is active in the community.`,
+        text: `âœ¨ ${member.name} is active in the community.`,
         timestamp: new Date()
       };
       setQaMessages((prev: any) => [...prev, joinMsg]);
@@ -6154,9 +6301,9 @@ function DiscordDevHub({ socket, username, nicknames, qaMessages, setQaMessages,
         // Always offer DM help for ANY community message (not just questions)
         setTimeout(() => {
           const helpReplies = [
-            `Hey @${member.name}! 👋 I can help with this. DM me and we'll sort it out!`,
-            `@${member.name} — I've got you covered on this. Come to my DM for a detailed answer 📩`,
-            `Noticed your message @${member.name}! DM me directly, I can guide you through this 🚀`,
+            `Hey @${member.name}! ðŸ‘‹ I can help with this. DM me and we'll sort it out!`,
+            `@${member.name} â€” I've got you covered on this. Come to my DM for a detailed answer ðŸ“©`,
+            `Noticed your message @${member.name}! DM me directly, I can guide you through this ðŸš€`,
           ];
           const replyText = helpReplies[Math.floor(Math.random() * helpReplies.length)];
           const dmMsg = {
@@ -6224,7 +6371,7 @@ function DiscordDevHub({ socket, username, nicknames, qaMessages, setQaMessages,
       avatar: username,
       isBot: false,
       text: qaInput,
-      replyTo: replyTo ? { sender: replyTo.sender, text: typeof replyTo.text === 'string' ? replyTo.text.slice(0, 80) : '📎 Media' } : null,
+      replyTo: replyTo ? { sender: replyTo.sender, text: typeof replyTo.text === 'string' ? replyTo.text.slice(0, 80) : 'ðŸ“Ž Media' } : null,
       timestamp: new Date()
     };
 
@@ -6458,35 +6605,35 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
       chosenReplier = mentionedMember;
       const mentionReplies: Record<string, string[]> = {
         DevBot: [
-          `Hey ${username}! You mentioned me. I'm DevBot — ask me anything about Node.js, WebRTC, or Unreal Engine integrations! 🤖`,
+          `Hey ${username}! You mentioned me. I'm DevBot â€” ask me anything about Node.js, WebRTC, or Unreal Engine integrations! ðŸ¤–`,
           `${username} pinged me! Ready to assist. What do you need help with?`
         ],
         agent7205: [
-          `${username} mentioned me! Great timing — I was just brainstorming a new decentralized feature idea. What's up?`,
+          `${username} mentioned me! Great timing â€” I was just brainstorming a new decentralized feature idea. What's up?`,
           `Oh hey ${username}! I'm agent7205. Let's build something amazing together!`
         ],
         Rift_Dev: [
-          `${username} called me out! 💪 Rift_Dev here. Need help with C++ or Unreal sockets?`,
+          `${username} called me out! ðŸ’ª Rift_Dev here. Need help with C++ or Unreal sockets?`,
           `Yo ${username}! Compiling some C++ right now but I'm here. What do you need?`
         ],
         Luna_Coder: [
-          `${username} mentioned me! 🌙 Luna_Coder here. Need UI help or Next.js fixes?`,
-          `Hey ${username}! I love being tagged. Working on a glassmorphic layout — what can I help with?`
+          `${username} mentioned me! ðŸŒ™ Luna_Coder here. Need UI help or Next.js fixes?`,
+          `Hey ${username}! I love being tagged. Working on a glassmorphic layout â€” what can I help with?`
         ],
         Cyber_Sam: [
-          `${username} pinged me! Cyber_Sam here. Socket issues? I'm your person 🔌`,
+          `${username} pinged me! Cyber_Sam here. Socket issues? I'm your person ðŸ”Œ`,
           `Hey ${username}! I was just monitoring the WebSocket tunnel. What do you need?`
         ],
         Neon_Gamer: [
-          `${username} tagged me! Neon_Gamer ready. Wanna play Ludo? Minimum bet 500 LKR! 🎮`,
+          `${username} tagged me! Neon_Gamer ready. Wanna play Ludo? Minimum bet 500 LKR! ðŸŽ®`,
           `Ayo ${username}! I'm always online for a game. Challenge me!`
         ],
         Pixel_Art: [
-          `${username} called for me! 🎨 Pixel_Art here. Need some design feedback?`,
+          `${username} called for me! ðŸŽ¨ Pixel_Art here. Need some design feedback?`,
           `Hey ${username}! Love the ping. Let's make something beautiful together!`
         ],
         Ashfaq: [
-          `${username}, you called? Ashfaq here — the root architect. What do you need from me?`,
+          `${username}, you called? Ashfaq here â€” the root architect. What do you need from me?`,
           `Hey ${username}! As the founder of this platform, I'm always here. What's the issue?`
         ],
       };
@@ -6681,10 +6828,10 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                       return (
                         <div key={msg.id} className="my-2 bg-gradient-to-r from-[#0c1a10] to-[#0c1222] border border-emerald-500/30 rounded-2xl p-4 shadow-[0_0_20px_rgba(16,185,129,0.08)]">
                           <div className="flex items-center gap-3 mb-3">
-                            <span className="text-2xl">🎮</span>
+                            <span className="text-2xl">ðŸŽ®</span>
                             <div>
                               <p className="text-white font-black font-mono text-sm">Neural Ludo Game Invite</p>
-                              <p className="text-emerald-500 text-[10px] font-mono">Hosted by {msg.sender} · Room {msg.ludoRoomId}</p>
+                              <p className="text-emerald-500 text-[10px] font-mono">Hosted by {msg.sender} Â· Room {msg.ludoRoomId}</p>
                             </div>
                             <span className="ml-auto text-[8px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">4 PLAYERS</span>
                           </div>
@@ -6707,7 +6854,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                             }}
                             className="w-full py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-black font-black rounded-xl text-xs font-mono uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)]"
                           >
-                            🚀 Join Game · Deploy to Grid
+                            ðŸš€ Join Game Â· Deploy to Grid
                           </button>
                         </div>
                       );
@@ -6734,7 +6881,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                             <span className="text-[10px] text-gray-500 font-mono select-none">
                               {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
-                            {/* Reply button — shows on hover */}
+                            {/* Reply button â€” shows on hover */}
                             <button
                               onClick={() => {
                                 setReplyTo(msg);
@@ -6742,13 +6889,13 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                               }}
                               className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2 py-0.5 font-mono select-none"
                             >
-                              ↩ Reply
+                              â†© Reply
                             </button>
                           </div>
                           {/* Reply-to quote bubble */}
                           {msg.replyTo && (
                             <div className="flex items-center gap-2 mb-2 pl-3 border-l-2 border-[#5865F2] bg-[#5865F2]/5 rounded-r-lg py-1 pr-2">
-                              <span className="text-[10px] text-[#7289da] font-bold font-mono truncate">↩ {msg.replyTo.sender}</span>
+                              <span className="text-[10px] text-[#7289da] font-bold font-mono truncate">â†© {msg.replyTo.sender}</span>
                               <span className="text-[10px] text-gray-500 font-mono truncate">{msg.replyTo.text}</span>
                             </div>
                           )}
@@ -6769,9 +6916,9 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                               onClick={() => onGoToChat && onGoToChat(msg.dmMemberInfo || { name: msg.dmTargetName, avatar: msg.dmTargetName, isBot: false }, msg.dmQuestion)}
                               className="mt-2 flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-[#5865F2] to-violet-600 hover:from-violet-500 hover:to-[#5865F2] text-white text-xs font-bold font-mono rounded-xl transition-all shadow-[0_0_15px_rgba(88,101,242,0.4)] hover:shadow-[0_0_25px_rgba(88,101,242,0.6)] border border-[#5865F2]/30 w-fit"
                             >
-                              <span className="text-base">📩</span>
+                              <span className="text-base">ðŸ“©</span>
                               Open DM Chat
-                              <span className="text-[9px] bg-white/20 px-1.5 py-0.5 rounded-full">→</span>
+                              <span className="text-[9px] bg-white/20 px-1.5 py-0.5 rounded-full">â†’</span>
                             </button>
                           )}
                           <div className="text-[13px] leading-relaxed text-gray-300 break-words font-mono whitespace-pre-wrap">
@@ -6840,10 +6987,10 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                   {replyTo && (
                     <div className="flex items-center gap-3 px-4 pt-2.5 pb-2 border-b border-white/5">
                       <div className="flex-1 flex items-center gap-2 bg-[#5865F2]/10 border border-[#5865F2]/30 rounded-lg px-3 py-1.5">
-                        <span className="text-[10px] text-[#7289da] font-bold font-mono">↩ Replying to {replyTo.sender}</span>
-                        <span className="text-[10px] text-gray-400 font-mono truncate max-w-[200px]">{typeof replyTo.text === 'string' ? replyTo.text.slice(0, 60) : '📎 Media'}</span>
+                        <span className="text-[10px] text-[#7289da] font-bold font-mono">â†© Replying to {replyTo.sender}</span>
+                        <span className="text-[10px] text-gray-400 font-mono truncate max-w-[200px]">{typeof replyTo.text === 'string' ? replyTo.text.slice(0, 60) : 'ðŸ“Ž Media'}</span>
                       </div>
-                      <button onClick={() => setReplyTo(null)} className="text-gray-500 hover:text-white text-xs transition-all select-none">✕</button>
+                      <button onClick={() => setReplyTo(null)} className="text-gray-500 hover:text-white text-xs transition-all select-none">âœ•</button>
                     </div>
                   )}
                   {/* @mention autocomplete dropdown */}
@@ -6926,7 +7073,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                           isBot: false,
                           isLudoInviteCard: true,
                           ludoRoomId: roomId,
-                          text: `🎮 ${username} is hosting a Neural Ludo game! Room: ${roomId}`,
+                          text: `ðŸŽ® ${username} is hosting a Neural Ludo game! Room: ${roomId}`,
                           timestamp: new Date()
                         };
                         setQaMessages((prev: any) => [...prev, inviteCard]);
@@ -6934,7 +7081,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
                       className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold font-mono rounded-lg transition-all uppercase tracking-wider flex items-center gap-1"
                       title="Host a Ludo Game"
                     >
-                      🎮 Ludo
+                      ðŸŽ® Ludo
                     </button>
                   </div>
                 </div>
@@ -6943,7 +7090,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
               <div className="max-w-3xl space-y-8 select-text">
                 {activeChannel === 'welcome-rules' && (
                   <>
-                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">⚡ WELCOME & ACCESS RULES</h1>
+                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">âš¡ WELCOME & ACCESS RULES</h1>
                     <p className="text-gray-300 leading-relaxed text-sm">
                       Welcome to the official developer hub for the Aura Chatbot and Grid System. This interface lists technical documentation and C++ or Node integration schemas.
                     </p>
@@ -6961,7 +7108,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
 
                 {activeChannel === 'official-announcements' && (
                   <>
-                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">📢 ENGINE ANNOUNCEMENTS</h1>
+                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">ðŸ“¢ ENGINE ANNOUNCEMENTS</h1>
                     <div className="space-y-6">
                       <div className="bg-[#2b2d31]/50 border-l-4 border-emerald-500 rounded-r-2xl p-6">
                         <div className="flex justify-between items-center mb-2">
@@ -6978,7 +7125,7 @@ Aura handles VoIP signaling over WebSockets. Once a Call is requested:
 
                 {activeChannel === 'nodejs-sdk' && (
                   <>
-                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">📦 NODE.JS REALTIME SDK</h1>
+                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">ðŸ“¦ NODE.JS REALTIME SDK</h1>
                     <p className="text-gray-300 leading-relaxed text-sm font-sans mb-4">
                       Aura's core server runs on Node.js using Socket.io. You can programmatically stream messages or connect chat agents in just a few lines of JavaScript.
                     </p>
@@ -7007,7 +7154,7 @@ function broadcastMessage(targetId, text) {
 
                 {activeChannel === 'nextjs-integration' && (
                   <>
-                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">⚛️ NEXT.JS PORTAL ENGINE</h1>
+                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">âš›ï¸ NEXT.JS PORTAL ENGINE</h1>
                     <p className="text-gray-300 leading-relaxed text-sm font-sans mb-4">
                       Aura Client uses Next.js app directory structure. Ensure to avoid rendering layout components using client-only window evaluations (such as width-based conditional layouts) inside Next.js components to prevent hydration failures.
                     </p>
@@ -7035,7 +7182,7 @@ export default function AppLayout() {
 
                 {activeChannel === 'unreal-engine-realtime' && (
                   <>
-                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">🎮 UNREAL ENGINE SOCKET INTEGRATION</h1>
+                    <h1 className="text-3xl font-black text-white font-mono border-b border-white/10 pb-3 uppercase tracking-tighter">ðŸŽ® UNREAL ENGINE SOCKET INTEGRATION</h1>
                     <p className="text-gray-300 leading-relaxed text-sm font-sans mb-4">
                       Establish real-time data loops inside Unreal Engine using standard C++ WebSockets. Ensure you include the WebSockets header file and target Aura's WS server port.
                     </p>
@@ -7093,7 +7240,7 @@ void AMyGameMode::ConnectToAuraServer() {
                         title="Invite to Ludo"
                         className="opacity-0 group-hover:opacity-100 transition-all w-6 h-6 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-400 hover:text-black flex items-center justify-center text-xs shrink-0"
                       >
-                        🎮
+                        ðŸŽ®
                       </button>
                     )}
                   </div>
@@ -7136,7 +7283,7 @@ void AMyGameMode::ConnectToAuraServer() {
 function CallLogsPage({ callLogs, onCall, username, onlineUsers }: any) {
   return (
     <div className="w-full h-full overflow-y-auto flex flex-col bg-[#050810]">
-      {/* ── Hero Header ── */}
+      {/* â”€â”€ Hero Header â”€â”€ */}
       <div className="relative shrink-0 h-48 md:h-56 overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-[#0b211a] via-[#050810] to-[#0d160f]" />
         <div className="absolute -top-16 -left-16 w-72 h-72 rounded-full bg-green-500/10 blur-3xl" />
@@ -7197,12 +7344,12 @@ function CallLogsPage({ callLogs, onCall, username, onlineUsers }: any) {
                       </span>
                       <div className="flex items-center gap-1.5 mt-0.5 text-xs text-gray-500 font-mono">
                         {isOutgoing ? (
-                          <span className="text-emerald-500 transform rotate-45">↗</span>
+                          <span className="text-emerald-500 transform rotate-45">â†—</span>
                         ) : (
-                          <span className="text-blue-500 transform rotate-45">↙</span>
+                          <span className="text-blue-500 transform rotate-45">â†™</span>
                         )}
                         <span>{log.isVideo ? 'Video' : 'Voice'} Call</span>
-                        <span className="text-gray-600">•</span>
+                        <span className="text-gray-600">â€¢</span>
                         <span>{dateStr} {timeStr}</span>
                       </div>
                     </div>
